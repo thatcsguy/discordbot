@@ -1,5 +1,5 @@
 // Voice profiles: a cheap-model write-up of how each regular talks (vocabulary, catchphrases, running
-// jokes, opinions, how they take teasing, style) plus real quotes, built from messages spread across
+// themes, how they tease and take teasing, usual reactions), built from messages spread across
 // the whole log instead of the latest conversation. Used by skills like !predict that impersonate people.
 //
 // Only people with at least MIN_MESSAGES logged messages qualify; nobody else ever costs tokens.
@@ -20,9 +20,11 @@ const REFRESH_SAMPLE_CHARS = 60_000;
 const CHUNK_CHARS = 40_000; // one cheap-model call reads about this much
 const CONTEXT_BEFORE = 2; // other people's messages shown before each sampled one, so reactions make sense
 const CONTEXT_GAP_MS = 30 * 60000; // ...only if they were posted within this long before it
-const MAX_QUOTES = 30;
+// Profiles are summaries of style and tendencies, not quote lists: verbatim quotes made skills parrot
+// random lines. Profiles saved in an older format are rebuilt from scratch by the next "!profiles build".
+export const PROFILE_FORMAT_VERSION = 2;
 
-/** profiles = { [userId]: { name, builtAt, updatedAt, throughTs, messageCount, text, quotes: [] } } */
+/** profiles = { [userId]: { name, builtAt, updatedAt, throughTs, messageCount, text, format } } */
 let profiles = {};
 try {
   profiles = JSON.parse(fs.readFileSync(FILE, "utf8"));
@@ -35,6 +37,13 @@ function save() {
   fs.renameSync(TMP, FILE);
 }
 
+/** Is this profile in the current format (or does it need a full rebuild)? */
+export const isCurrent = (p) => p?.format === PROFILE_FORMAT_VERSION;
+
+/** How a skill should use a profile; shown with every profile handed to Claude. */
+export const PROFILE_GUIDANCE =
+  "Use it to capture their style and tendencies, not as a script: write new lines in their voice rather than reusing phrases from the profile. Only bring up a recurring theme when the topic actually comes up, and vary which traits you lean on from one reply to the next.";
+
 export function getProfile(userId) {
   return profiles[userId] ?? null;
 }
@@ -45,12 +54,9 @@ export function profileText(userId) {
   if (!p) return "";
   const built = new Date(p.updatedAt ?? p.builtAt).toISOString().slice(0, 10);
   return [
-    `Voice profile of ${p.name} (user ID ${userId}), from ${p.messageCount} of their messages across the whole chat log, last updated ${built}:`,
+    `Voice profile of ${p.name} (user ID ${userId}), summarized from ${p.messageCount} of their messages across the whole chat log, last updated ${built}. ${PROFILE_GUIDANCE}`,
     p.text,
-    p.quotes.length ? `Real quotes (verbatim, from across the log):\n${p.quotes.map((q) => `- ${q}`).join("\n")}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].join("\n");
 }
 
 /** Messages that count toward a profile: real people, not bots or commands. */
@@ -157,47 +163,18 @@ export function chunkSnippets(snippets, size = CHUNK_CHARS) {
 }
 
 const NOTES_SYSTEM = (name) =>
-  `You study how one person in a Discord server of friends talks, so a chat bot can later imitate them convincingly. The person is ${name}; their lines are marked with ">>", other lines are context. Write compact notes on ${name} only:
-- Vocabulary and slang, spelling habits, capitalization, punctuation, emoji, typical message length
-- Catchphrases and things they say often
-- Recurring topics, interests, and running jokes
-- Opinions and stances they hold (on anything)
-- How they react to being teased, being wrong, surprises, and good or bad news
-- Who they talk to and how
-Then copy 10-15 of their most characteristic lines EXACTLY as written (verbatim, without the timestamp or name), under a heading "Quotes:", one per line starting with "- ".
-Describe durable patterns, not one-off events. Output only the notes.`;
+  `You study how one person in a Discord server of friends talks, so a chat bot can later write NEW messages in their voice. The person is ${name}; their lines are marked with ">>", other lines are context. Write compact notes on ${name} only, describing patterns, not individual messages:
+- Tone and attitude (dry, hyped, sarcastic, earnest, ...)
+- Message shape: typical length, capitalization, punctuation, emoji, spelling and slang habits
+- Humor: how they joke, how they tease others, and how they take being teased
+- Usual reactions to being wrong, surprises, good or bad news, arguments
+- Who they talk to most and how
+- Recurring themes: only topics, jokes or opinions they bring up again and again across these excerpts (say roughly how often, e.g. "in about 10 of these excerpts"). Skip anything that shows up only once or twice; one-off moments and random lines are not patterns.
+- Signature phrases: only words or phrases they use many times (say how often). Don't copy ordinary lines.
+Output only the notes.`;
 
 const PROFILE_FORMAT = (name) =>
-  `Write the profile of ${name} with these sections, as compact bullet points: Style (length, caps, punctuation, emoji, spelling), Vocabulary and catchphrases, Recurring topics and running jokes, Opinions, Reactions (to teasing, being wrong, surprise), Relationships (who they talk to and how). Keep it under about 500 words. Then a heading "Quotes:" with 20-30 of their most characteristic lines copied EXACTLY from the notes, one per line starting with "- ", varied across topics and moods. Output only the profile.`;
-
-/** Pull the "Quotes:" list off the end of a model's profile text. */
-export function splitQuotes(text) {
-  const at = text.search(/^\**quotes:?\**:?\s*$/im);
-  if (at < 0) return { body: text.trim(), quotes: [] };
-  const quotes = text
-    .slice(at)
-    .split("\n")
-    .slice(1)
-    .map((l) => l.replace(/^\s*[-*•]\s*/, "").trim())
-    .map((l) => l.replace(/^["“](.*)["”]$/, "$1"))
-    .filter(Boolean);
-  return { body: text.slice(0, at).trim(), quotes };
-}
-
-/** Keep only quotes that really appear in the person's messages (the model sometimes paraphrases). */
-export function verifyQuotes(quotes, theirTexts) {
-  const norm = (s) => s.toLowerCase().replace(/\s+/g, " ").trim();
-  const texts = theirTexts.map(norm);
-  const seen = new Set();
-  const out = [];
-  for (const q of quotes) {
-    const n = norm(q);
-    if (n.length < 2 || seen.has(n) || !texts.some((t) => t.includes(n))) continue;
-    seen.add(n);
-    out.push(q);
-  }
-  return out;
-}
+  `Write the profile of ${name} as compact bullet points under these headings: Tone, Message shape (length, caps, punctuation, emoji, spelling), Humor and teasing (how they tease and how they take it), Usual reactions, Who they talk to, Recurring themes, Signature phrases. The profile is a summary of style and tendencies for writing new messages in their voice, not a collection of things they said: no quotes or example messages. Under Recurring themes, list only topics, jokes or opinions they raise clearly more than the others do, across several months, and phrase each as a tendency ("tends to bring up X when Y comes up"), not something to mention every time. Under Signature phrases, at most 5 words or phrases they really use a lot, or "none" if nothing stands out. Keep it under about 400 words. Output only the profile.`;
 
 let building = false;
 
@@ -225,7 +202,8 @@ export async function buildProfiles({ ask, botUserId, only = null, force = false
         continue;
       }
       const existing = person.profile;
-      const refresh = existing && !force;
+      // An old-format profile (with verbatim quotes) is rebuilt from scratch rather than refreshed.
+      const refresh = isCurrent(existing) && !force;
       if (refresh && person.newSinceBuild < MIN_NEW_MESSAGES) {
         if (only) result.skipped.push(`${person.name} is up to date (${person.newSinceBuild} new messages since the last build)`);
         continue;
@@ -243,8 +221,8 @@ export async function buildProfiles({ ask, botUserId, only = null, force = false
         }
         const merged = refresh
           ? await call(
-              `You keep a profile of how ${person.name} talks in a Discord server, so a chat bot can imitate them. Update the existing profile with notes on their newer messages: add new habits, jokes and opinions, adjust what changed, keep what still holds. You may swap in fresh quotes from the notes but keep a mix across time. ${PROFILE_FORMAT(person.name)}`,
-              `Existing profile:\n${existing.text}\n\nQuotes:\n${existing.quotes.map((q) => `- ${q}`).join("\n")}\n\nNotes on newer messages:\n\n${notes.join("\n\n---\n\n")}`,
+              `You keep a profile of how ${person.name} talks in a Discord server, so a chat bot can write new messages in their voice. Update the existing profile with notes on their newer messages: adjust what changed, keep what still holds, and add a recurring theme only if it now clearly recurs. ${PROFILE_FORMAT(person.name)}`,
+              `Existing profile:\n${existing.text}\n\nNotes on newer messages:\n\n${notes.join("\n\n---\n\n")}`,
               4000,
             )
           : await call(
@@ -252,9 +230,8 @@ export async function buildProfiles({ ask, botUserId, only = null, force = false
               `Notes, oldest samples first:\n\n${notes.join("\n\n---\n\n")}`,
               4000,
             );
-        const { body, quotes } = splitQuotes(merged);
+        const body = merged.trim();
         if (!body) throw new Error("the model returned an empty profile");
-        const theirTexts = entries.filter((e) => e.userId === person.userId).map((e) => e.text);
         const now = new Date().toISOString();
         profiles[person.userId] = {
           name: person.name,
@@ -263,7 +240,7 @@ export async function buildProfiles({ ask, botUserId, only = null, force = false
           throughTs: person.lastTs,
           messageCount: person.count,
           text: body,
-          quotes: verifyQuotes(quotes, theirTexts).slice(0, MAX_QUOTES),
+          format: PROFILE_FORMAT_VERSION,
         };
         save();
         (refresh ? result.refreshed : result.built).push(person.name);
@@ -290,10 +267,12 @@ export function renderProfiles(botUserId) {
   for (const p of eligible) {
     const state = !p.profile
       ? "no profile yet"
+      : !isCurrent(p.profile)
+      ? "old-format profile (with quotes), rebuilt by the next build"
       : `profile from ${day(p.profile.updatedAt)}${p.newSinceBuild ? `, ${p.newSinceBuild} new message${p.newSinceBuild === 1 ? "" : "s"} since` : ", up to date"}`;
     lines.push(`- ${p.name}: ${p.count} messages, ${state}`);
   }
   if (others.length) lines.push(`Not enough messages yet: ${others.map((p) => `${p.name} (${p.count})`).join(", ")}`);
-  lines.push("", "`!profiles build` builds missing ones and refreshes ones with 30+ new messages. `!profiles build Name` does one person, `!profiles rebuild Name` starts theirs over, `!profiles show Name` posts it.");
+  lines.push("", "`!profiles build` builds missing ones and refreshes ones with 30+ new messages (old-format ones are rebuilt). `!profiles build Name` does one person, `!profiles rebuild Name` starts theirs over, `!profiles show Name` posts it.");
   return lines.join("\n");
 }

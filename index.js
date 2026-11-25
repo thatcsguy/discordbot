@@ -6,7 +6,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { notePerson, activeItems, skillName, knownPeople, editItem } from "./store.js";
 import { logMessage, formatLine, channelSummaries, updateSummaries, updateRollups, prune, lastLoggedByChannel, firstLoggedDay } from "./chatlog.js";
 import { logEntry as toLogEntry, backfillChannel, readableChannels } from "./backfill.js";
-import { buildProfiles, renderProfiles, profileStatus, profileText, getProfile, MIN_MESSAGES } from "./profiles.js";
+import { buildProfiles, renderProfiles, profileStatus, profileText, getProfile, isCurrent, PROFILE_GUIDANCE, MIN_MESSAGES } from "./profiles.js";
 import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool, renderList } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
@@ -449,7 +449,7 @@ async function profilesCommand(message, input) {
   }
   const only = ids.size ? [...ids] : null;
   const todo = status.filter(
-    (p) => p.count >= MIN_MESSAGES && (!only || only.includes(p.userId)) && (action === "rebuild" || !p.profile || p.newSinceBuild >= 30),
+    (p) => p.count >= MIN_MESSAGES && (!only || only.includes(p.userId)) && (action === "rebuild" || !isCurrent(p.profile) || p.newSinceBuild >= 30),
   );
   if (todo.length) await sendReply(message, `Working on ${todo.map((p) => p.name).join(", ")} with the cheap model. This can take a minute or two.`);
   await message.channel.sendTyping();
@@ -519,7 +519,7 @@ async function handleCommand(message) {
     const named = peopleNamed(`${input} ${target}`, message, people);
     const loaded = [...named.keys()].filter((id) => getProfile(id)).map(profileText);
     const missing = [...named].filter(([id]) => !getProfile(id)).map(([, n]) => n);
-    if (loaded.length) profiles += `Voice profiles of the people in the input (their long-term patterns; lean on these over the recent messages):\n\n${loaded.join("\n\n")}`;
+    if (loaded.length) profiles += `Voice profiles of the people in the input (their long-term style and tendencies; lean on these over the recent messages, but don't parrot them: ${PROFILE_GUIDANCE})\n\n${loaded.join("\n\n")}`;
     if (missing.length) profiles += `${profiles ? "\n\n" : ""}No voice profile for: ${missing.join(", ")}. Use sample_chat_log with their user_id to learn how they talk across the whole log.`;
   }
 
@@ -572,15 +572,18 @@ async function backfill(startedAt) {
 }
 
 /**
- * One-time update of the !predict skill saved before voice profiles existed: point it at the profiles
- * and spread sampling, and fix its "14 days back" wording. Logged like any other edit, and it only
- * touches the old text, so later edits by people in the server are left alone.
+ * One-time update of the !predict skill when the bot's own wording for it changes: point it at the
+ * profiles and spread sampling (and away from the old "14 days back" and "real quotes" wording).
+ * Logged like any other edit, and it only touches text the bot wrote, so edits by people are left alone.
  */
-const PREDICT_PROMPT = `The input names a person (and optionally a topic or situation). Find them in the Known people list (by name or nickname). If not listed, say they need to post in the server or be @mentioned once. Goal: PREDICT what they would say or do next, not echo what they already said. Steps: (1) Use their voice profile (loaded for you below, or call get_voice_profile with their user ID): it describes how they talk across the whole chat log, with real quotes, and is your main source for their voice, opinions, running jokes, and how they react to being teased, wrong, or surprised. (2) If they have no profile, or for the topic at hand, use sample_chat_log with their user_id (skip_recent_days 2, and a query for the topic if there is one) to see messages spread across the whole log, not just the latest ones. (3) Read the recent channel messages only to understand the current situation and what they have ALREADY said; treat those as context, never as material to repeat. (4) Predict what NEW thing they'd most likely say next given the latest development, extrapolating from their long-term patterns rather than their last few messages. (5) Hard rules: do not restate, paraphrase, or quote any point they already made in the recent messages; the prediction must add new content such as a reaction, a pivot, a joke, a counterargument, or a follow-up. Don't invent wild claims out of character. (6) Output format: start with "Predicted [name]:" then the prediction in their voice (1-3 sentences), matching their real message length, capitalization, and punctuation. Do NOT add a confidence line or any explanation after it; just let the joke land. If they have little chat history, say so briefly. Keep it short and Discord-friendly.`;
+const PREDICT_PROMPT = `The input names a person (and optionally a topic or situation). Find them in the Known people list (by name or nickname). If not listed, say they need to post in the server or be @mentioned once. Goal: PREDICT what they would say or do next, not echo what they already said. Steps: (1) Use their voice profile (loaded for you below, or call get_voice_profile with their user ID): it summarizes how they talk across the whole chat log (tone, message shape, humor, how they tease and take teasing, usual reactions, recurring themes) and is your main source for their voice. Capture their style and tendencies, not exact phrases: write a new line they'd plausibly say, don't reuse wording from the profile, only bring up a recurring theme if the topic actually comes up, and vary which traits you use between predictions. (2) If they have no profile, or for the topic at hand, use sample_chat_log with their user_id (skip_recent_days 2, and a query for the topic if there is one) to see messages spread across the whole log, not just the latest ones. (3) Read the recent channel messages only to understand the current situation and what they have ALREADY said; treat those as context, never as material to repeat. (4) Predict what NEW thing they'd most likely say next given the latest development, extrapolating from their long-term patterns rather than their last few messages. (5) Hard rules: do not restate, paraphrase, or quote any point they already made in the recent messages; the prediction must add new content such as a reaction, a pivot, a joke, a counterargument, or a follow-up. Don't invent wild claims out of character. (6) Output format: start with "Predicted [name]:" then the prediction in their voice (1-3 sentences), matching their real message length, capitalization, and punctuation. Do NOT add a confidence line or any explanation after it; just let the joke land. If they have little chat history, say so briefly. Keep it short and Discord-friendly.`;
+
+// Earlier versions of PREDICT_PROMPT the bot saved itself; a prompt still matching one is updated.
+const OLD_PREDICT_MARKERS = [/up to 14 days back/, /describes how they talk across the whole chat log, with real quotes/];
 
 function upgradePredictSkill() {
   const skill = activeItems("skill").find((s) => s.name === "predict");
-  if (!skill || !/up to 14 days back/.test(skill.text)) return;
+  if (!skill || !OLD_PREDICT_MARKERS.some((re) => re.test(skill.text))) return;
   const result = editItem(skill.id, { text: PREDICT_PROMPT, recentMessages: 15 }, { id: null, name: "bot update" });
   if (result.error) console.error("[skills] Couldn't update !predict:", result.error);
   else console.log(`[skills] Updated !predict (#${skill.id}) to use voice profiles and spread sampling.`);
