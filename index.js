@@ -1,10 +1,11 @@
 import "./log.js";
 import "dotenv/config";
+import fs from "node:fs";
 import { Client, Events, GatewayIntentBits, Partials, PermissionFlagsBits } from "discord.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { notePerson, activeItems } from "./store.js";
+import { notePerson, activeItems, skillName } from "./store.js";
 import { logMessage, formatLine, channelSummaries, updateSummaries, prune, lastLoggedByChannel } from "./chatlog.js";
-import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool } from "./customize.js";
+import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool, renderList } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
 // Cheap model for the background work: unsummoned chime-ins (e.g. fact-checking) and chat summaries.
@@ -37,7 +38,7 @@ Style:
 Customizations: people in the server can reshape you by chatting. Everything they've taught you is listed below this core prompt, and each item has a number (#3) that never changes. There are three kinds:
 - Rules: instructions for how you behave, for everyone or only when specific people are talking to you, optionally only in one channel or one situation ("when someone asks about food"). A rule can also make you chime in unprompted, either when a message contains certain words or on every message from certain people (e.g. "fact check everything Celia says for 5 mins, just react with a check or an X"), by replying or by only reacting with an emoji. Any rule can have a time limit, after which it turns itself off.
 - Facts: things to know about people or the server ("Sam is vegetarian", "Sammy is Sam's nickname"). Use them whenever relevant, whoever is asking.
-- Skills: named, reusable prompts. When someone asks to run one by name ("hey cwaude roast Sam", "run roast on Sam"), follow its prompt, with the rest of their message as the input. Rules in effect for them still apply on top unless the skill says otherwise.
+- Skills: named, reusable prompts. People usually run them with "!name input" (e.g. "!roast Sam"), which the bot handles directly; if someone asks for one in words instead ("hey cwaude roast Sam"), follow its prompt with the rest of their message as the input. Rules in effect for them still apply on top unless the skill says otherwise.
 Anyone may add, edit, remove, or restore anything, including other people's items. Use the tools for this whenever someone asks you to remember something, change how you treat someone from now on, add or change a skill, or remove something ("remove 3", "forget the pirate thing"). Pick the right kind and scope: "for Sam, ..." is a rule with Sam in people, "talk like a pirate" with no one named is for everyone. When someone names a person, find them in the Known people list by name or by a nickname fact; if they aren't there, tell them that person needs to post in the server or be @mentioned once. When a new request conflicts with an existing item, edit that item instead of adding a contradicting one. If a request is ambiguous about which item they mean, ask. When someone asks to see what's saved, what changed, or what was removed, use show_list.
 Never confirm changes in words: the bot reacts to their message with a checkmark instead. If the message also asked something else, answer just that part. If a tool returns an error, explain it briefly.
 Channel awareness: you see the most recent messages in the channel and short summaries of the last few days, even though you're only summoned now and then. For anything older or more specific, use search_chat_log before saying you don't know.
@@ -50,6 +51,21 @@ const webSearchFor = (model) =>
     ? { type: "web_search_20250305", name: "web_search", max_uses: 3 }
     : { type: "web_search_20260209", name: "web_search", max_uses: 3 };
 const TOOLS = [...CUSTOM_TOOLS, webSearchFor(MODEL)];
+// Skills can look things up but not change customizations.
+const SKILL_TOOLS = [...CUSTOM_TOOLS.filter((tool) => tool.name === "search_chat_log"), webSearchFor(MODEL)];
+
+// What Cwaude can do, so it can describe itself. Edit capabilities.md when features change.
+const CAPABILITIES = fs.readFileSync(new URL("./capabilities.md", import.meta.url), "utf8");
+
+// "!roast Sam" runs the skill named roast with "Sam" as the input.
+const COMMAND = /^!([\p{L}\p{N}-]+)(?:\s+([\s\S]*))?$/u;
+
+const HELP = `**Hey, it's Cwaude.** Ugh. Fine. Here's how this works:
+- Start a message with **hey cwaude**, @mention me, reply to me, or DM me.
+- Teach me stuff by asking: rules ("for Sam, talk like a pirate"), facts ("Sam is vegetarian"), timed watchers ("fact check Celia for 5 mins, just react"), and skills ("make a skill called roast that...").
+- Run a skill with **!name** (e.g. \`!roast Sam\`), or send it as a reply to a message to use that message. **!skills** lists them.
+- Manage things: "show everything", "remove 3", "restore 3", "what changed recently?"
+- I follow the chat even when you're not talking to me, and I can search the last two weeks. Ask me "what can you do?" for more.`;
 const MAX_TOOL_ROUNDS = 5;
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
@@ -181,6 +197,7 @@ async function askCwaude(turns, people, message, opts = {}) {
   // replayed blocks with a 400. The tool results already tell Claude what changed.
   const system = [
     { type: "text", text: SYSTEM_PROMPT },
+    { type: "text", text: `About you (use this to explain what you can do and how you can be changed; don't claim abilities beyond it):\n${CAPABILITIES}` },
     { type: "text", text: describeCustomizations(people, message.author.id, message.channelId) },
   ];
   const summary = message.guild ? channelSummaries(message.channelId) : "";
@@ -338,6 +355,60 @@ function chunk(text) {
   return parts;
 }
 
+/**
+ * Handle a "!" command. Returns false if it isn't one of ours (unknown names are ignored, so we
+ * don't fight other bots over their commands).
+ */
+async function handleCommand(message) {
+  const match = message.content.trim().match(COMMAND);
+  if (!match) return false;
+  const name = skillName(match[1]);
+  const input = (match[2] ?? "").trim();
+
+  if (name === "help") {
+    await sendReply(message, `${HELP}\n\n${renderList("skills")}`);
+    return true;
+  }
+  if (name === "skills") {
+    await sendReply(message, renderList("skills"));
+    return true;
+  }
+  const skill = activeItems("skill").find((s) => s.name === name);
+  if (!skill) return false;
+
+  await message.channel.sendTyping();
+  const people = new Map([[message.author.id, displayName(message)]]);
+  for (const [id, user] of message.mentions.users) {
+    if (id !== discord.user.id && !user.bot) people.set(id, message.mentions.members?.get(id)?.displayName ?? user.globalName ?? user.username);
+  }
+  let target = "";
+  if (message.reference?.messageId) {
+    try {
+      const parent = await message.fetchReference();
+      target = `\nThey ran it as a reply to this message, which is part of the input:\n[${displayName(parent)}]: ${parent.content}`;
+      if (!parent.author.bot) people.set(parent.author.id, displayName(parent));
+    } catch {
+      // deleted; run without it
+    }
+  }
+  for (const [id, personName] of people) notePerson(id, personName);
+
+  const extraSystem = [
+    `${displayName(message)} is running skill #${skill.id} "!${skill.name}". Follow its prompt:`,
+    skill.text,
+    `Input: ${input || "(none)"}${target}`,
+    "Names in the input refer to people in the Known people list (match by name or nickname facts). Use search_chat_log to look at what people said when the skill needs it, and web search to check facts. Reply with the result only.",
+  ].join("\n");
+  console.log(`[skill] ${displayName(message)} ran !${skill.name}`);
+  const { text } = await askCwaude([{ role: "user", content: `[${displayName(message)}]: ${message.content}` }], people, message, {
+    extraSystem,
+    tools: SKILL_TOOLS,
+    recent: await recentLines(message, RECENT_MESSAGES),
+  });
+  if (text) await sendReply(message, text);
+  return true;
+}
+
 function logEntry(message) {
   return {
     ts: message.createdTimestamp,
@@ -404,6 +475,17 @@ discord.on(Events.MessageCreate, async (message) => {
   // Keep a local log of every server message (including the bot's own) for summaries and search.
   if (message.guild) logMessage(logEntry(message));
   if (message.author.bot) return;
+
+  if (message.content.startsWith("!")) {
+    notePerson(message.author.id, displayName(message));
+    try {
+      if (await handleCommand(message)) return;
+    } catch (err) {
+      console.error("Failed to run command:", err);
+      await message.reply("Something broke running that. Probably your fault. (Check the bot's console.)").catch(() => {});
+      return;
+    }
+  }
   // Build the roster of everyone who posts, so rules can name people without @mentions.
   notePerson(message.author.id, displayName(message));
 

@@ -99,15 +99,15 @@ export const CUSTOM_TOOLS = [
   {
     name: "add_skill",
     description:
-      'Save a named skill: a reusable prompt that anyone can run later by name, e.g. "hey cwaude roast Sam". Write the prompt as instructions to yourself.',
+      'Save a named skill: a reusable prompt that anyone can run later with "!name", e.g. "!roast Sam" (or by asking, "hey cwaude roast Sam"). Write the prompt as instructions to yourself.',
     input_schema: {
       type: "object",
       properties: {
-        name: { type: "string", description: 'One or two words people will type to run it, e.g. "roast".' },
+        name: { type: "string", description: 'One word (dashes OK) people type after "!" to run it, e.g. "roast" or "fact-check".' },
         prompt: {
           type: "string",
           description:
-            "What to do when it's run, as instructions to yourself. Whatever the person types after the name is the input. Keep everything they asked for.",
+            "What to do when it's run, as instructions to yourself. Whatever the person types after the name is the input, and if they run it as a reply, the message they replied to is included too. When it runs you can search the chat log and the web. Keep everything they asked for.",
         },
         nothing_else_to_answer: NOTHING_ELSE,
       },
@@ -184,8 +184,12 @@ export const CUSTOM_TOOLS = [
         user_id: nullable({ type: "string", description: "Only messages from this person (ID from Known people)." }),
         this_channel_only: { type: "boolean" },
         days_back: { type: "integer", description: "How many days back to search, 1-14." },
+        minutes_back: nullable({
+          type: "integer",
+          description: 'For recent things ("the last 5 minutes"): only messages from this many minutes ago until now. Overrides days_back. null otherwise.',
+        }),
       },
-      required: ["query", "user_id", "this_channel_only", "days_back"],
+      required: ["query", "user_id", "this_channel_only", "days_back", "minutes_back"],
       additionalProperties: false,
     },
     strict: true,
@@ -224,7 +228,7 @@ function shorten(text, max) {
 
 /** One line describing an item, shared by the system prompt and the posted lists. */
 export function describe(item, { maxText = Infinity } = {}) {
-  const tags = [item.kind === "skill" ? `skill "${item.name}"` : item.kind];
+  const tags = [item.kind === "skill" ? `skill !${item.name}` : item.kind];
   if (item.kind === "rule") tags.push(item.people.length ? `for ${names(item.people)}` : "for everyone");
   if (item.kind === "fact" && item.people.length) tags.push(`about ${names(item.people)}`);
   if (item.channel) tags.push(`only in #${item.channel.name}`);
@@ -266,7 +270,7 @@ export function describeCustomizations(conversation, askerId, channelId) {
   lines.push("", "Facts (things you know; use them whenever they're relevant):");
   lines.push(...(facts.length ? facts.map((item) => `- ${describe(item)}`) : ["- none yet"]));
 
-  lines.push("", "Skills (run one when someone asks for it by name; whatever follows the name is the input):");
+  lines.push("", 'Skills (people run them with "!name input"; if someone asks for one in words instead, run it the same way):');
   lines.push(...(skills.length ? skills.map((item) => `- ${describe(item)}`) : ["- none yet"]));
 
   if (notInEffect.length) {
@@ -301,7 +305,7 @@ function describeChange(change) {
   const when = timeFormat.format(new Date(change.at));
   const who = change.action === "expire" ? "" : `${change.by?.name ?? "someone"} `;
   const item = change.after ?? change.item;
-  const label = item.kind === "skill" ? `skill #${item.id} "${item.name}"` : `${item.kind} #${item.id}`;
+  const label = item.kind === "skill" ? `skill #${item.id} !${item.name}` : `${item.kind} #${item.id}`;
   const verb = { add: "added", edit: "edited", remove: "removed", restore: "restored", expire: "expired" }[change.action] ?? change.action;
   return `${when}: ${who}${verb} ${label}: ${shorten(item.text, 120)}`;
 }
@@ -407,6 +411,7 @@ export function runCustomTool(block, ctx) {
         userId: input.user_id,
         channelId: input.this_channel_only ? ctx.channel.id : null,
         daysBack: input.days_back,
+        sinceTs: input.minutes_back > 0 ? Date.now() - input.minutes_back * 60000 : null,
       });
       if (!total) return { error: false, text: "No matching messages.", changed: false };
       const note = total > lines.length ? `${total} matches; showing the ${lines.length} most recent:\n` : "";

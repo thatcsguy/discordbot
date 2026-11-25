@@ -8,6 +8,13 @@ const LOG = new URL("./changes.log", import.meta.url);
 const OLD_MEMORY = new URL("./memory.json", import.meta.url);
 
 export const KINDS = ["rule", "fact", "skill"];
+// Built-in "!" commands; skills can't take these names.
+export const RESERVED_NAMES = ["help", "skills"];
+
+/** "Fact Check" -> "fact-check", so a skill name is one word you can type after "!". */
+export function skillName(name) {
+  return (name ?? "").trim().toLowerCase().replace(/^!+/, "").replace(/[^\p{L}\p{N}-]+/gu, "-").replace(/^-+|-+$/g, "");
+}
 
 /**
  * data = {
@@ -16,7 +23,7 @@ export const KINDS = ["rule", "fact", "skill"];
  *   people: { [userId]: { name } },
  * }
  * - text: the instruction (rule), the fact, or the skill's prompt.
- * - name: skills only, the word people use to run it.
+ * - name: skills only, the word people type after "!" to run it (letters, digits, dashes).
  * - people: user IDs a rule applies to (when they're the one talking). Empty = everyone.
  *   For facts: who the fact is about (empty = general).
  * - channel: { id, name } or null for everywhere.
@@ -79,7 +86,7 @@ function blankItem(fields, by, now) {
     id: data.nextId++,
     kind: fields.kind,
     text: fields.text.trim(),
-    name: fields.name?.trim().toLowerCase() || null,
+    name: fields.kind === "skill" ? skillName(fields.name) : null,
     people: fields.people ?? [],
     channel: fields.channel ?? null,
     when: fields.when?.trim() || null,
@@ -156,8 +163,10 @@ export function addItem(fields, by) {
   if (!KINDS.includes(fields.kind)) return { error: `Unknown kind "${fields.kind}".` };
   if (!fields.text?.trim()) return { error: "The text is empty." };
   if (fields.kind === "skill") {
-    if (!fields.name?.trim()) return { error: "A skill needs a name." };
-    const clash = activeItems("skill").find((s) => s.name === fields.name.trim().toLowerCase());
+    const name = skillName(fields.name);
+    if (!name) return { error: "A skill needs a name." };
+    if (RESERVED_NAMES.includes(name)) return { error: `"!${name}" is a built-in command; pick another name.` };
+    const clash = activeItems("skill").find((s) => s.name === name);
     if (clash) return { error: `There's already a skill called "${clash.name}" (#${clash.id}). Edit or remove that one.` };
   }
   const unknown = (fields.people ?? []).filter((id) => !data.people[id]);
@@ -180,7 +189,13 @@ export function editItem(id, changes, by) {
     if (!changes.text.trim()) return { error: "The text is empty." };
     item.text = changes.text.trim();
   }
-  if (changes.name != null && item.kind === "skill") item.name = changes.name.trim().toLowerCase();
+  if (changes.name != null && item.kind === "skill") {
+    const name = skillName(changes.name);
+    if (!name || RESERVED_NAMES.includes(name)) return { error: `Can't use "${changes.name}" as a skill name.` };
+    const clash = activeItems("skill").find((s) => s.name === name && s.id !== id);
+    if (clash) return { error: `There's already a skill called "${name}" (#${clash.id}).` };
+    item.name = name;
+  }
   if (changes.people != null) {
     const unknown = changes.people.filter((uid) => !data.people[uid]);
     if (unknown.length) return { error: `Unknown user ID(s): ${unknown.join(", ")}.` };

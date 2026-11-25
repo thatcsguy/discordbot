@@ -86,11 +86,13 @@ export function prune() {
  * Search the log. Every filter is optional; words must all appear (any order, any case).
  * Returns formatted lines, oldest first, capped at `limit` (the most recent matches win).
  */
-export function searchLog({ query, userId, channelId, daysBack = 7, limit = 40 }) {
+export function searchLog({ query, userId, channelId, daysBack = 7, sinceTs = null, limit = 40 }) {
+  if (sinceTs) daysBack = Math.ceil((Date.now() - sinceTs) / 86400000) + 1;
   const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
   const matches = [];
   for (const day of lastDays(Math.min(Math.max(daysBack, 1), KEEP_DAYS))) {
     for (const entry of readDay(day)) {
+      if (sinceTs && entry.ts < sinceTs) continue;
       if (userId && entry.userId !== userId) continue;
       if (channelId && entry.channelId !== channelId) continue;
       const text = entry.text.toLowerCase();

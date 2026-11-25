@@ -42,7 +42,7 @@ Anyone in the server can reshape Cwaude just by asking it. Everything they add g
 - **Chime-in rules** make it reply without being summoned: "hey cwaude, whenever anyone says pineapple pizza, reply 'gross'". The bot checks messages against the trigger words itself and only calls Claude when one matches.
 - **Watchers** are chime-in rules for people instead of words, usually with a time limit: "hey cwaude fact check everything Celia says for 5 mins, just react with a check or an X". They turn themselves off when the time is up (that shows in the change log too). Chime-ins run on the cheap model (`CHEAP_MODEL`, Haiku by default).
 - **Facts** are things it should know: "hey cwaude, remember Sam is vegetarian", "hey cwaude, Sammy is Sam's nickname".
-- **Skills** are reusable prompts you run by name: "hey cwaude, make a skill called roast: write a 3-line roast of whoever I name", then "hey cwaude roast Sam".
+- **Skills** are reusable prompts you run with `!`: "hey cwaude, make a skill called factcheck: look at what the named person said in the last 5 minutes and check whether it's true", then `!factcheck celia`. Send a skill as a reply to a message to run it on that message. `!skills` lists them, `!help` shows a help card. Unknown `!` commands are ignored, so other bots' commands don't clash.
 
 Managing them:
 - "hey cwaude show everything" / "show rules" / "show skills" / "show removed" posts a numbered list.
@@ -62,6 +62,10 @@ Cwaude follows the chat even when nobody's talking to it:
 Let your friends know the bot keeps this log. It never leaves your computer except for the summary requests to the API.
 
 Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). These, and the chat log and summaries, are all git-ignored. The core personality in `SYSTEM_PROMPT` can't be changed from chat; user rules layer on top of it. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
+
+## What it knows about itself
+
+`capabilities.md` describes what Cwaude can do, and it's loaded into the core prompt so the bot can answer "what can you do?" accurately. Update it when you add features. The current rules, facts and skills are shown to it automatically.
 
 ## Tweaking
 
