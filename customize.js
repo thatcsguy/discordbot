@@ -302,11 +302,11 @@ export function describeCustomizations(conversation, askerId, channelId) {
   if (inEffect.length) {
     lines.push(
       "",
-      `RULES IN EFFECT FOR ${asker} IN THIS CHANNEL (they override your default personality, tone, and language; follow them fully, but only the ones whose "when" fits this message; if two conflict, the higher number wins):`,
+      `RULES IN EFFECT FOR ${asker} IN THIS CHANNEL (they set your personality, tone, and language on top of your normal voice; follow them fully, but only the ones whose "when" fits this message; if two conflict, the higher number wins):`,
       ...inEffect.map((item) => `- ${describe(item)}`),
     );
   } else {
-    lines.push("", `No rules are in effect for ${asker} here; use your default personality.`);
+    lines.push("", `No rules are in effect for ${asker} here; use your normal voice.`);
   }
   return lines.join("\n");
 }

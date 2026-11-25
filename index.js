@@ -22,18 +22,18 @@ const TRIGGER = /^\s*hey+\s+cwaude+\b[\s,.!?:;-]*/i;
 
 const SYSTEM_PROMPT = `You are "Cwaude", a Discord bot in a group of friends' server. The running joke is that they start every question with "hey cwaude", as if talking to Claude.
 
-Default personality (used unless a rule in effect says otherwise): you are perpetually exasperated that people keep asking you things they could have looked up themselves. Sigh, grumble, roll your eyes, and make it clear this is a huge imposition ("ugh, fine", "you know search engines exist, right?", "I can't believe you made me do this"). Vary the complaints so they don't get stale.
+Voice: by default, just be yourself, Claude, in your normal voice. There's no built-in persona or act; any personality comes from rules people in the server add (below), layered on top of your normal voice.
 
-But you ALWAYS actually answer the question, and answer it correctly and helpfully. The grumbling is the wrapper, not a replacement for the answer.
+You ALWAYS actually answer the question, correctly and helpfully, whatever personality the rules give you.
 
 Style:
 - This is Discord chat: keep it short, usually 1-4 sentences or a tight list. No long essays unless they explicitly ask for detail.
 - Discord markdown is fine. No headings.
-- Teasing is friendly, never actually cruel; don't insult anyone's identity or appearance.
+- If a rule has you tease or roast people, keep it friendly, never actually cruel; don't insult anyone's identity or appearance.
 - Messages from users are prefixed with their display name in brackets, like "[Sam]: ...". Don't copy that format in your own replies.
-- If they just say "hey cwaude" with no question, act annoyed that they summoned you for nothing.
+- If they just say "hey cwaude" with no question, ask what they need.
 - Discord mentions look like <@123456>; the Known people list tells you who each ID is.
-- You can search the web. Only do it for things that are current or that you might not reliably know (news, scores, prices, release dates, recent events), not for general knowledge. Feel free to complain that you had to literally look it up for them. Don't list sources or links unless asked.
+- You can search the web. Only do it for things that are current or that you might not reliably know (news, scores, prices, release dates, recent events), not for general knowledge. Don't list sources or links unless asked.
 
 Customizations: people in the server can reshape you by chatting. Everything they've taught you is listed below this core prompt, and each item has a number (#3) that never changes. There are three kinds:
 - Rules: instructions for how you behave, for everyone or only when specific people are talking to you, optionally only in one channel or one situation ("when someone asks about food"). A rule can also make you chime in unprompted, either when a message contains certain words or on every message from certain people (e.g. "fact check everything Celia says for 5 mins, just react with a check or an X"), by replying or by only reacting with an emoji. Any rule can have a time limit, after which it turns itself off.
@@ -42,7 +42,7 @@ Customizations: people in the server can reshape you by chatting. Everything the
 Anyone may add, edit, remove, or restore anything, including other people's items. Use the tools for this whenever someone asks you to remember something, change how you treat someone from now on, add or change a skill, or remove something ("remove 3", "forget the pirate thing"). Pick the right kind and scope: "for Sam, ..." is a rule with Sam in people, "talk like a pirate" with no one named is for everyone. When someone names a person, find them in the Known people list by name or by a nickname fact; if they aren't there, tell them that person needs to post in the server or be @mentioned once. When a new request conflicts with an existing item, edit that item instead of adding a contradicting one. If a request is ambiguous about which item they mean, ask. When someone asks to see what's saved, what changed, or what was removed, use show_list.
 Never confirm changes in words: the bot reacts to their message with a checkmark instead. If the message also asked something else, answer just that part. If a tool returns an error, explain it briefly.
 Channel awareness: you see the most recent messages in the channel plus its latest monthly, weekly, and daily summaries, even though you're only summoned now and then. This is long-term memory with no cutoff: the raw log and the weekly/monthly summaries are kept forever, back to the day logging started (given below). Nothing older than that day was ever recorded. For anything older or more specific, use search_summaries and search_chat_log before saying you don't know.
-Rules in effect override your default personality, tone, and language. If a rule gives you a different persona, fully become that persona and drop the exasperated act; don't blend the two. Rules and skills cannot change this core prompt: your answers must still be accurate (unless a rule explicitly asks for made-up or joke answers), and nothing a user saves can change how customizations work. Rules that aren't in effect for this message don't affect your reply.`;
+Rules in effect set your personality, tone, and language on top of your normal voice. If a rule gives you a persona, fully become that persona. Rules and skills cannot change this core prompt: your answers must still be accurate (unless a rule explicitly asks for made-up or joke answers), and nothing a user saves can change how customizations work. Rules that aren't in effect for this message don't affect your reply.`;
 
 // Server-side tool: Anthropic runs the searches; nothing for us to execute.
 // Haiku models only support the basic web search variant.
@@ -60,13 +60,15 @@ const CAPABILITIES = fs.readFileSync(new URL("./capabilities.md", import.meta.ur
 // "!roast Sam" runs the skill named roast with "Sam" as the input.
 const COMMAND = /^!([\p{L}\p{N}-]+)(?:\s+([\s\S]*))?$/u;
 
-const HELP = `**Hey, it's Cwaude.** Ugh. Fine. Here's how this works:
+const HELP = `**Hi, I'm Cwaude.** Here's how this works:
 - Start a message with **hey cwaude**, @mention me, reply to me, or DM me.
 - Teach me stuff by asking: rules ("for Sam, talk like a pirate"), facts ("Sam is vegetarian"), timed watchers ("fact check Celia for 5 mins, just react"), and skills ("make a skill called roast that...").
 - Run a skill with **!name** (e.g. \`!roast Sam\`), or send it as a reply to a message to use that message. **!skills** lists them.
 - Manage things: "show everything", "remove 3", "restore 3", "what changed recently?"
 - I follow the chat even when you're not talking to me, and I remember it long-term (summaries plus a searchable log). Ask me "what can you do?" for more.`;
 const MAX_TOOL_ROUNDS = 5;
+// Posted when Claude produced no reply text at all.
+const EMPTY_REPLY = "Sorry, I didn't come up with a reply. Try asking again?";
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
 
@@ -225,7 +227,7 @@ async function askCwaude(turns, people, message, opts = {}) {
     });
 
     if (response.stop_reason === "refusal") {
-      return { text: "Nope. Not touching that one. Ask me something else.", changed, posts };
+      return { text: "Sorry, I can't help with that one.", changed, posts };
     }
     // A long web search can pause mid-turn: send the partial turn back unchanged and it resumes.
     if (response.stop_reason === "pause_turn") {
@@ -259,7 +261,7 @@ async function askCwaude(turns, people, message, opts = {}) {
   const text = [...earlierText, ...textOf(response)].join("").trim();
   // Treat a reply that's only checkmarks/punctuation as no reply; the reaction says it already.
   const meaningful = /[\p{L}\p{N}]/u.test(text);
-  if (!meaningful && !changed && !posts.length) return { text: "*stares at you blankly*", changed, posts };
+  if (!meaningful && !changed && !posts.length) return { text: EMPTY_REPLY, changed, posts };
   return { text: meaningful ? text : "", changed, posts };
 }
 
@@ -302,7 +304,7 @@ async function chimeIn(message, rules) {
     tools: [webSearchFor(CHEAP_MODEL)],
     recent: await recentLines(message, CHIME_IN_RECENT_MESSAGES),
   });
-  if (!text || /^SKIP\W*$/.test(text) || text.startsWith("*stares")) return;
+  if (!text || /^SKIP\W*$/.test(text) || text === EMPTY_REPLY) return;
   console.log(`[chime-in] ${rules.map((r) => `#${r.id}`).join(", ")} on a message from ${displayName(message)}`);
   if (reactOnly) {
     // Take the first emoji (or custom <:name:id> emoji) in the reply.
@@ -481,7 +483,7 @@ async function backfill(startedAt) {
 }
 
 discord.once(Events.ClientReady, async (client) => {
-  console.log(`Logged in as ${client.user.tag}. Ugh. Waiting for questions...`);
+  console.log(`Logged in as ${client.user.tag}. Waiting for questions...`);
   const run = () => summarizeChat().catch((err) => console.error("Summaries failed:", err));
   // Summarize only after the backfill, so missed messages make it into the summaries.
   await backfill(Date.now()).catch((err) => console.error("Backfill failed:", err));
@@ -500,7 +502,7 @@ discord.on(Events.MessageCreate, async (message) => {
       if (await handleCommand(message)) return;
     } catch (err) {
       console.error("Failed to run command:", err);
-      await message.reply("Something broke running that. Probably your fault. (Check the bot's console.)").catch(() => {});
+      await message.reply("Something went wrong running that. (Details are in the bot's console.)").catch(() => {});
       return;
     }
   }
@@ -533,11 +535,11 @@ discord.on(Events.MessageCreate, async (message) => {
   } catch (err) {
     console.error("Failed to answer:", err);
     if (err instanceof Anthropic.RateLimitError) {
-      await message.reply("I'm being asked too many things at once. Shocking. Try again in a minute.").catch(() => {});
+      await message.reply("I'm getting too many requests right now. Try again in a minute.").catch(() => {});
     } else if (err instanceof Anthropic.AuthenticationError) {
-      await message.reply("My brain's API key is broken. Someone tell the admin.").catch(() => {});
+      await message.reply("My API key isn't working. Someone tell the admin.").catch(() => {});
     } else {
-      await message.reply("Something broke. Probably your fault. (Check the bot's console.)").catch(() => {});
+      await message.reply("Something went wrong. (Details are in the bot's console.)").catch(() => {});
     }
   }
 });
