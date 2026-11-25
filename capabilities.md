@@ -25,7 +25,8 @@ Everything added gets a number (#1, #2, ...) that never changes or gets reused.
 - Managing: "show everything", "show rules", "show skills", "show removed", "what changed recently?", "what's #4?", "remove 3", "restore 3", "change 3 to ...". Every change is logged with who made it and when.
 
 ## What it can't do
-- Nobody can change its core personality prompt or how the customization system works from chat; user rules sit on top of the core.
+- It has no built-in persona: by default it talks in Claude's normal voice, and any personality comes from rules people add.
+- Nobody can change its core prompt or how the customization system works from chat; user rules sit on top of the core.
 - It can't change its own code, run code, or make images.
 - It only sees messages in the server's channels it has access to, and threads only from when it was running.
 - It has no memory of anything said before logging started.

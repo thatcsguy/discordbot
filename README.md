@@ -1,6 +1,6 @@
 # hey cwaude
 
-A Discord bot that answers your questions, reluctantly. It responds when a message:
+A Discord bot for a friends' server, running on Claude in its normal voice, that people can reshape by chatting with it. It responds when a message:
 
 - starts with **"hey cwaude"** (any capitalization, extra letters like "heyyy cwaudeee" work too)
 - **@mentions** the bot
@@ -64,7 +64,7 @@ There's no time limit on this memory, but it only goes back to when logging star
 
 Let your friends know the bot keeps this log. The files stay on your computer, but excerpts go to the Anthropic API: new messages for the hourly summaries, and recent messages, summaries, and search results whenever the bot is summoned or chimes in.
 
-Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). These, and the chat log and summaries, are all git-ignored. The core personality in `SYSTEM_PROMPT` can't be changed from chat; user rules layer on top of it. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
+Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). These, and the chat log and summaries, are all git-ignored. The core prompt in `SYSTEM_PROMPT` can't be changed from chat. It has no built-in persona, so the bot uses Claude's normal voice, and user rules layer any personality on top. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
 
 ## What it knows about itself
 
@@ -72,7 +72,7 @@ Everything is stored locally in `customizations.json`, and every change is appen
 
 ## Tweaking
 
-- **Personality**: edit `SYSTEM_PROMPT` in `index.js`.
+- **Core prompt**: edit `SYSTEM_PROMPT` in `index.js`. For personality, it's usually easier to just add a rule from chat.
 - **Model / cost**: set `CLAUDE_MODEL` in `.env`. The default is `claude-opus-5-5`. `claude-haiku-5-5` costs about 1/40th as much and handles chat well.
 - **Background model**: `CHEAP_MODEL` (default `claude-haiku-5-5`) handles chime-ins and summaries. Use `claude-sonnet-5-5` if fact-checking chime-ins aren't accurate enough.
 - **What it can say about itself**: edit `capabilities.md`.
