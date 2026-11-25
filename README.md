@@ -42,7 +42,7 @@ Anyone in the server can reshape Cwaude just by asking it. Everything they add g
 - **Chime-in rules** make it reply without being summoned: "hey cwaude, whenever anyone says pineapple pizza, reply 'gross'". The bot checks messages against the trigger words itself and only calls Claude when one matches.
 - **Watchers** are chime-in rules for people instead of words, usually with a time limit: "hey cwaude fact check everything Celia says for 5 mins, just react with a check or an X". They turn themselves off when the time is up (that shows in the change log too). Chime-ins run on the cheap model (`CHEAP_MODEL`, Haiku by default).
 - **Facts** are things it should know: "hey cwaude, remember Sam is vegetarian", "hey cwaude, Sammy is Sam's nickname".
-- **Skills** are reusable prompts you run with `!`: "hey cwaude, make a skill called factcheck: look at what the named person said in the last 5 minutes and check whether it's true", then `!factcheck celia`. Send a skill as a reply to a message to run it on that message. `!skills` lists them, `!help` shows a help card. Unknown `!` commands are ignored, so other bots' commands don't clash.
+- **Skills** are reusable prompts you run with `!`: "hey cwaude, make a skill called factcheck: look at what the named person said in the last 5 minutes and check whether it's true", then `!factcheck celia`. Send a skill as a reply to a message to run it on that message. `!skills` lists them, `!help` shows a help card. Unknown `!` commands are ignored, so other bots' commands don't clash. A skill can be told to see fewer of the recent messages, or none ("make it ignore the current chat"), so it isn't swayed by the last conversation.
 
 Managing them:
 - "hey cwaude show everything" / "show rules" / "show skills" / "show removed" posts a numbered list.
@@ -60,11 +60,36 @@ Cwaude follows the chat even when nobody's talking to it:
 - When a week or month ends, the cheap model rolls that channel's daily summaries up into a weekly and a monthly summary, kept forever. Daily summaries are dropped after 60 days once their month is rolled up. When summoned, the bot sees the latest monthly summary, the two latest weekly summaries and the last three daily ones, and can search all summaries for older things.
 - For anything older or more specific ("what restaurant did Celia mention last week?", "what did we talk about in March?"), it can search the summaries and the full log.
 
-There's no time limit on this memory, but it only goes back to when logging started: the first run of this version, plus the up-to-7 days it caught up on then.
+There's no time limit on this memory, but it only goes back to when logging started: the first run of this version, plus the up-to-7 days it caught up on then, or further if you imported older history (see below).
 
 Let your friends know the bot keeps this log. The files stay on your computer, but excerpts go to the Anthropic API: new messages for the hourly summaries, and recent messages, summaries, and search results whenever the bot is summoned or chimes in.
 
 Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). These, and the chat log and summaries, are all git-ignored. The core prompt in `SYSTEM_PROMPT` can't be changed from chat. It has no built-in persona, so the bot uses Claude's normal voice, and user rules layer any personality on top. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
+
+## Voice profiles
+
+For skills that imitate people (like `!predict`), the bot can keep a **voice profile** of each regular: their style (length, caps, punctuation, emoji), vocabulary and catchphrases, recurring topics and running jokes, opinions, how they react to teasing or being wrong, who they talk to, and 20-30 real quotes. Profiles are written by the cheap model (`CHEAP_MODEL`) from excerpts spread evenly across every month of the log, each with a couple of lines of the conversation before it, so they reflect the whole year rather than last night's chat. Quotes are checked against the log and dropped if the model paraphrased them.
+
+- Only people with **100+ logged messages** qualify. Nobody else ever costs tokens.
+- Profiles are **never built automatically**. In Discord:
+  - `!profiles` lists who qualifies (with message counts), who has a profile, and how many new messages each has since.
+  - `!profiles build` builds missing profiles and refreshes ones with 30+ new messages. A refresh reads only the messages posted since that person's last build.
+  - `!profiles build Name` / `!profiles rebuild Name` (start over from the whole log) / `!profiles show Name` work on one person.
+- A full build reads up to about 50k tokens per person on Haiku (a few cents); the bot reports the tokens used.
+- They're saved in `profiles.json` (git-ignored, stays on your computer).
+
+Any skill can use them. The model has a `get_voice_profile` tool for one or more people, and a skill whose prompt mentions "voice profile" gets the profiles of everyone named, @mentioned or replied to in its input loaded up front. For example "hey cwaude make a skill called debate: the input names two people and a topic; using their voice profiles, write a short back-and-forth where each argues in their own voice", then `!debate Myps Celia pineapple pizza`. Skills also get `sample_chat_log`, which returns someone's messages spread across every month (optionally skipping the last few days) instead of the latest ones.
+
+### Importing older history
+
+The log normally starts when the bot first ran. To give the profiles and searches the whole year, import older messages from Discord once:
+
+```bash
+npm run backfill-history                 # back to 2026-01-01
+npm run backfill-history -- 2025-06-01   # or another start date
+```
+
+It uses no Anthropic tokens, only Discord's history API, skips messages already in the log (so it's safe to re-run, and safe while the bot is running), and can take a while on a busy server. Imported messages aren't summarized (that would cost tokens); they're searchable and feed the profiles. Run `!profiles build` afterwards.
 
 ## What it knows about itself
 

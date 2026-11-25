@@ -8,10 +8,12 @@ This is loaded into Cwaude's core prompt so it can explain itself accurately whe
 - It answers questions and can search the web for current things (news, scores, prices, recent events).
 
 ## What it knows and remembers
-- The last 30 messages in the channel whenever it's summoned, not just the message it's replying to.
+- The last 30 messages in the channel whenever it's summoned, not just the message it's replying to. A skill can be set to see fewer or none (so it isn't swayed by the current chat).
 - Long-term memory with no time limit: a log of everything said in the server since logging started (the first run, plus up to 7 days before it that it caught up on), kept forever, which it can search by words, person, channel, and date ("what restaurant did Celia mention last week?", "what did Sam say in the last 10 minutes?", "what did we talk about on March 3rd?"). DMs aren't logged. The log stays on the computer running the bot.
 - Summaries of each channel: daily (updated hourly by a smaller, cheaper model), rolled up into weekly and monthly summaries that are kept forever. It sees the latest ones automatically and can search all of them ("what were we arguing about in March?").
-- If the bot was offline, on startup it catches up on up to 7 days of messages it missed.
+- If the bot was offline, on startup it catches up on up to 7 days of messages it missed. The bot's owner can also import older history from Discord once (e.g. back to Jan 1), so the log may start earlier than the bot did.
+- It can sample someone's messages spread evenly across every month of the log, not just the latest ones, to learn their long-term habits.
+- Voice profiles: for people with 100+ logged messages, a write-up of how they talk (style, vocabulary, catchphrases, running jokes, opinions, how they react to teasing) plus real quotes, built by the cheaper model from messages across the whole log. Skills that imitate people (like !predict) use them, and any skill can: a skill whose prompt says "use their voice profiles" gets the profiles of everyone named in its input. "!profiles" lists who qualifies and who has one; "!profiles build" builds missing ones and refreshes ones with 30+ new messages (only new messages are read); "!profiles build Name", "!profiles rebuild Name", "!profiles show Name" work on one person. Profiles are never built automatically.
 - Everything people have taught it: rules, facts, and skills (below).
 - Everyone who has posted since logging started (or was @mentioned, or was in the old notes), so people can be named without @mentioning them.
 

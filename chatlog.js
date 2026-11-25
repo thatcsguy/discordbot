@@ -33,7 +33,7 @@ export function formatLine(entry, { withDate = false, withChannel = false } = {}
   return `${when}${withChannel ? ` #${entry.channelName}` : ""} ${entry.name}: ${entry.text}`;
 }
 
-/** Append a message to today's log. `entry` = { ts, channelId, channelName, userId, name, text, bot }. */
+/** Append a message to its day's log. `entry` = { id, ts, channelId, channelName, userId, name, text, bot }. */
 export function logMessage(entry) {
   if (!entry.text) return;
   fs.appendFileSync(fileFor(dayOf(entry.ts)), JSON.stringify(entry) + "\n");
@@ -125,6 +125,84 @@ export function searchLog({ query, userId, channelId, daysBack = 7, sinceTs = nu
     }
   }
   return { total: matches.length, lines: matches.slice(-limit).map((e) => formatLine(e, { withDate: true, withChannel: true })) };
+}
+
+/**
+ * Every logged message from `fromDay` on (all of it by default), oldest first. Used by the voice
+ * profiles and by spread sampling, which need the whole year rather than the latest matches.
+ */
+export function allEntries({ fromDay = null } = {}) {
+  const entries = [];
+  for (const day of loggedDays()) if (!fromDay || day >= fromDay) entries.push(...readDay(day));
+  return entries;
+}
+
+/** A key that identifies a logged message, so a history backfill doesn't log something twice. */
+export const entryKey = (entry) => entry.id ?? `${entry.channelId}|${entry.userId}|${entry.ts}`;
+
+/** Keys of every message logged on or after `fromDay` (both forms, for entries saved with and without ids). */
+export function loggedKeys(fromDay) {
+  const keys = new Set();
+  for (const entry of allEntries({ fromDay })) {
+    keys.add(entryKey(entry));
+    keys.add(`${entry.channelId}|${entry.userId}|${entry.ts}`);
+  }
+  return keys;
+}
+
+/** Pick `n` items spread evenly through `items` (all of them if there are fewer). */
+export function spreadPick(items, n) {
+  if (items.length <= n) return [...items];
+  const picked = [];
+  for (let i = 0; i < n; i++) picked.push(items[Math.floor(((i + 0.5) * items.length) / n)]);
+  return picked;
+}
+
+/**
+ * Like searchLog, but instead of the latest matches it returns about `limit` matches spread evenly
+ * across the months of the log (each month gets an equal share), oldest first. `skipRecentDays` leaves
+ * out the last N days, so a skill can learn someone's long-term habits rather than today's chat.
+ */
+export function sampleLog({ query, userId, channelId, skipRecentDays = 0, fromDay = null, limit = 60 }) {
+  const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const cutoff = skipRecentDays > 0 ? dayOf(Date.now() - (skipRecentDays - 1) * 86400000) : null;
+  const byMonth = new Map();
+  let total = 0;
+  for (const day of loggedDays()) {
+    if ((fromDay && day < fromDay) || (cutoff && day >= cutoff)) continue;
+    for (const entry of readDay(day)) {
+      if (userId && entry.userId !== userId) continue;
+      if (channelId && entry.channelId !== channelId) continue;
+      const text = entry.text.toLowerCase();
+      if (!words.every((w) => text.includes(w))) continue;
+      const month = monthOf(day);
+      if (!byMonth.has(month)) byMonth.set(month, []);
+      byMonth.get(month).push(entry);
+      total++;
+    }
+  }
+  // Share the limit across months; months with fewer matches hand their leftover to the rest.
+  const months = [...byMonth.keys()].sort();
+  const quota = new Map();
+  let left = limit;
+  let open = months.filter((m) => byMonth.get(m).length > 0);
+  while (left > 0 && open.length) {
+    const share = Math.max(1, Math.floor(left / open.length));
+    for (const m of open) {
+      const room = byMonth.get(m).length - (quota.get(m) ?? 0);
+      const add = Math.min(share, room, left);
+      quota.set(m, (quota.get(m) ?? 0) + add);
+      left -= add;
+      if (left <= 0) break;
+    }
+    open = open.filter((m) => byMonth.get(m).length > (quota.get(m) ?? 0));
+  }
+  const picked = months.flatMap((m) => spreadPick(byMonth.get(m), quota.get(m) ?? 0));
+  return {
+    total,
+    months: months.map((m) => `${m}: ${byMonth.get(m).length}`),
+    lines: picked.map((e) => formatLine(e, { withDate: true, withChannel: true })),
+  };
 }
 
 /** The first day in the log, so Claude knows how far back memory goes. */

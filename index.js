@@ -1,19 +1,23 @@
 import "./log.js";
 import "dotenv/config";
 import fs from "node:fs";
-import { Client, Events, GatewayIntentBits, Partials, PermissionFlagsBits } from "discord.js";
+import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { notePerson, activeItems, skillName } from "./store.js";
+import { notePerson, activeItems, skillName, knownPeople, editItem } from "./store.js";
 import { logMessage, formatLine, channelSummaries, updateSummaries, updateRollups, prune, lastLoggedByChannel, firstLoggedDay } from "./chatlog.js";
+import { logEntry as toLogEntry, backfillChannel, readableChannels } from "./backfill.js";
+import { buildProfiles, renderProfiles, profileStatus, profileText, getProfile, MIN_MESSAGES } from "./profiles.js";
 import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool, renderList } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
 // Cheap model for the background work: unsummoned chime-ins (e.g. fact-checking) and chat summaries.
 const CHEAP_MODEL = process.env.CHEAP_MODEL || "claude-haiku-5-5";
-const RECENT_MESSAGES = 30; // channel messages shown to Claude when it's summoned
+const RECENT_MESSAGES = 30; // channel messages shown to Claude when it's summoned (a skill can ask for fewer)
 const CHIME_IN_RECENT_MESSAGES = 10;
 const SUMMARY_INTERVAL_MS = 60 * 60 * 1000; // hourly
-const BACKFILL_DAYS = 7; // on startup, fetch messages missed while the bot was off, up to this far back
+// On startup, fetch messages missed while the bot was off, up to this far back. For older history
+// (e.g. the whole year), run "npm run backfill-history" once instead.
+const BACKFILL_DAYS = 7;
 const MAX_CONTEXT_MESSAGES = 10; // how far back to follow a reply chain
 const DISCORD_LIMIT = 2000;
 
@@ -53,7 +57,10 @@ const webSearchFor = (model) =>
     : { type: "web_search_20260209", name: "web_search", max_uses: 3 };
 const TOOLS = [...CUSTOM_TOOLS, webSearchFor(MODEL)];
 // Skills can look things up but not change customizations.
-const SKILL_TOOLS = [...CUSTOM_TOOLS.filter((tool) => tool.name.startsWith("search_")), webSearchFor(MODEL)];
+const LOOKUP_TOOLS = new Set(["search_chat_log", "sample_chat_log", "search_summaries", "get_voice_profile"]);
+const SKILL_TOOLS = [...CUSTOM_TOOLS.filter((tool) => LOOKUP_TOOLS.has(tool.name)), webSearchFor(MODEL)];
+// A skill whose prompt mentions voice profiles gets the profiles of everyone named in its input up front.
+const WANTS_PROFILES = /voice profile/i;
 
 // What Cwaude can do, so it can describe itself. Edit capabilities.md when features change.
 const CAPABILITIES = fs.readFileSync(new URL("./capabilities.md", import.meta.url), "utf8");
@@ -65,6 +72,7 @@ const HELP = `**Hi, I'm Cwaude.** Here's how this works:
 - Start a message with **hey cwaude**, @mention me, reply to me, or DM me.
 - Teach me stuff by asking: rules ("for Sam, talk like a pirate"), facts ("Sam is vegetarian"), timed watchers ("fact check Celia for 5 mins, just react"), and skills ("make a skill called roast that...").
 - Run a skill with **!name** (e.g. \`!roast Sam\`), or send it as a reply to a message to use that message. **!skills** lists them.
+- **!profiles** shows who has a voice profile (how they talk, for skills like !predict); \`!profiles build\` makes or refreshes them.
 - Manage things: "show everything", "remove 3", "restore 3", "what changed recently?"
 - I follow the chat even when you're not talking to me, and I remember it long-term (summaries plus a searchable log). Ask me "what can you do?" for more.`;
 const MAX_TOOL_ROUNDS = 5;
@@ -381,6 +389,88 @@ function chunk(text) {
   return parts;
 }
 
+/** The cheap model, for building voice profiles. */
+async function askCheap({ system, content, maxTokens }) {
+  const response = await anthropic.messages.create({
+    model: CHEAP_MODEL,
+    max_tokens: maxTokens,
+    output_config: { effort: "low" },
+    system,
+    messages: [{ role: "user", content }],
+  });
+  const text = response.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  if (!text) throw new Error(`empty reply (stop_reason ${response.stop_reason})`);
+  return { text, usage: response.usage };
+}
+
+/** Does `text` name this person (whole word, any case)? */
+function names(text, name) {
+  return Boolean(name) && containsKeyword(text, name);
+}
+
+/**
+ * The people a skill's input is about: @mentions, the author of the message it replies to, and
+ * anyone whose name (current or as logged) appears in the input. Map of user ID -> name.
+ */
+function peopleNamed(input, message, people) {
+  const found = new Map();
+  for (const [id, user] of message.mentions.users) if (id !== discord.user.id && !user.bot) found.set(id, people.get(id) ?? user.username);
+  for (const [id, { name }] of Object.entries(knownPeople())) if (names(input, name)) found.set(id, name);
+  for (const p of profileStatus(discord.user.id)) if (p.profile && (names(input, p.name) || names(input, p.profile.name))) found.set(p.userId, p.name);
+  return found;
+}
+
+/** "!profiles", "!profiles build [names]", "!profiles rebuild <names>", "!profiles show <name>". */
+async function profilesCommand(message, input) {
+  const [sub = "", ...rest] = input.split(/\s+/).filter(Boolean);
+  const action = sub.toLowerCase();
+  if (!["build", "rebuild", "show"].includes(action)) {
+    await sendReply(message, renderProfiles(discord.user.id));
+    return;
+  }
+  const status = profileStatus(discord.user.id);
+  const wanted = rest.join(" ");
+  const ids = new Set([...message.mentions.users.keys()].filter((id) => id !== discord.user.id));
+  for (const p of status) if (names(wanted, p.name) || names(wanted, knownPeople()[p.userId]?.name) || names(wanted, p.profile?.name)) ids.add(p.userId);
+  if (wanted && !ids.size) {
+    await sendReply(message, `I couldn't find "${wanted}" in the chat log. Use their display name or @mention them.`);
+    return;
+  }
+
+  if (action === "show") {
+    if (!ids.size) return sendReply(message, "Who? e.g. `!profiles show Sam`");
+    const texts = [...ids].map((id) => profileText(id) || `${status.find((p) => p.userId === id)?.name ?? "They"} don't have a profile yet.`);
+    await sendReply(message, texts.join("\n\n"));
+    return;
+  }
+  if (action === "rebuild" && !ids.size) {
+    await sendReply(message, "Rebuild whose? e.g. `!profiles rebuild Sam` (`!profiles build` refreshes everyone cheaply).");
+    return;
+  }
+  const only = ids.size ? [...ids] : null;
+  const todo = status.filter(
+    (p) => p.count >= MIN_MESSAGES && (!only || only.includes(p.userId)) && (action === "rebuild" || !p.profile || p.newSinceBuild >= 30),
+  );
+  if (todo.length) await sendReply(message, `Working on ${todo.map((p) => p.name).join(", ")} with the cheap model. This can take a minute or two.`);
+  await message.channel.sendTyping();
+  const result = await buildProfiles({
+    ask: askCheap,
+    botUserId: discord.user.id,
+    only,
+    force: action === "rebuild",
+    log: (line) => console.log(`[profiles] ${line}`),
+  });
+  const lines = [];
+  if (result.built.length) lines.push(`Built: ${result.built.join(", ")}.`);
+  if (result.refreshed.length) lines.push(`Refreshed: ${result.refreshed.join(", ")}.`);
+  if (result.skipped.length) lines.push(...result.skipped.map((s) => `Skipped: ${s}.`));
+  if (result.failed.length) lines.push(`Failed: ${result.failed.join(", ")}. (Details are in the bot's console.)`);
+  if (!lines.length) lines.push(`Nothing to do: everyone with ${MIN_MESSAGES}+ messages has an up-to-date profile.`);
+  if (result.inputTokens) lines.push(`Used about ${(result.inputTokens / 1000).toFixed(1)}k input and ${(result.outputTokens / 1000).toFixed(1)}k output tokens on ${CHEAP_MODEL}.`);
+  console.log(`[profiles] ${lines.join(" ")}`);
+  await sendReply(message, lines.join("\n"));
+}
+
 /**
  * Handle a "!" command. Returns false if it isn't one of ours (unknown names are ignored, so we
  * don't fight other bots over their commands).
@@ -397,6 +487,10 @@ async function handleCommand(message) {
   }
   if (name === "skills") {
     await sendReply(message, renderList("skills"));
+    return true;
+  }
+  if (name === "profiles") {
+    await profilesCommand(message, input);
     return true;
   }
   const skill = activeItems("skill").find((s) => s.name === name);
@@ -419,32 +513,37 @@ async function handleCommand(message) {
   }
   for (const [id, personName] of people) notePerson(id, personName);
 
+  // Voice profiles of everyone the input is about, for skills that imitate people (e.g. !predict).
+  let profiles = "";
+  if (WANTS_PROFILES.test(skill.text)) {
+    const named = peopleNamed(`${input} ${target}`, message, people);
+    const loaded = [...named.keys()].filter((id) => getProfile(id)).map(profileText);
+    const missing = [...named].filter(([id]) => !getProfile(id)).map(([, n]) => n);
+    if (loaded.length) profiles += `Voice profiles of the people in the input (their long-term patterns; lean on these over the recent messages):\n\n${loaded.join("\n\n")}`;
+    if (missing.length) profiles += `${profiles ? "\n\n" : ""}No voice profile for: ${missing.join(", ")}. Use sample_chat_log with their user_id to learn how they talk across the whole log.`;
+  }
+
   const extraSystem = [
     `${displayName(message)} is running skill #${skill.id} "!${skill.name}". Follow its prompt:`,
     skill.text,
     `Input: ${input || "(none)"}${target}`,
-    "Names in the input refer to people in the Known people list (match by name or nickname facts). Use search_chat_log to look at what people said when the skill needs it, and web search to check facts. Reply with the result only.",
-  ].join("\n");
+    "Names in the input refer to people in the Known people list (match by name or nickname facts). Use search_chat_log to look at what people said recently, sample_chat_log for their long-term habits across the whole log, get_voice_profile for how someone talks, and web search to check facts. Reply with the result only.",
+    profiles,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const recentCount = skill.recentMessages ?? RECENT_MESSAGES;
   console.log(`[skill] ${displayName(message)} ran !${skill.name}`);
   const { text } = await askCwaude([{ role: "user", content: `[${displayName(message)}]: ${message.content}` }], people, message, {
     extraSystem,
     tools: SKILL_TOOLS,
-    recent: await recentLines(message, RECENT_MESSAGES),
+    recent: recentCount > 0 ? await recentLines(message, recentCount) : [],
   });
   if (text) await sendReply(message, text);
   return true;
 }
 
-function logEntry(message) {
-  return {
-    ts: message.createdTimestamp,
-    channelId: message.channelId,
-    channelName: message.channel.name,
-    userId: message.author.id,
-    name: message.author.id === discord.user.id ? "Cwaude" : displayName(message),
-    text: message.content,
-  };
-}
+const logEntry = (message) => toLogEntry(message, discord.user.id);
 
 /**
  * Fetch, from Discord, the messages posted while the bot was off (since the last one logged in each
@@ -455,41 +554,41 @@ async function backfill(startedAt) {
   const lastLogged = lastLoggedByChannel();
   const floor = startedAt - BACKFILL_DAYS * 86400000;
   let total = 0;
-  for (const guild of discord.guilds.cache.values()) {
-    for (const channel of guild.channels.cache.values()) {
-      if (!channel.isTextBased() || !channel.viewable) continue;
-      if (!channel.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.ReadMessageHistory)) continue;
-      const since = Math.max(lastLogged.get(channel.id) ?? 0, floor);
-      let before;
-      try {
-        // Page backwards, newest first, 100 at a time, until we reach what we already have.
-        for (;;) {
-          const page = await channel.messages.fetch({ limit: 100, ...(before && { before }) });
-          if (page.size === 0) break;
-          let reachedEnd = false;
-          for (const message of page.values()) {
-            if (message.createdTimestamp <= since) {
-              reachedEnd = true;
-              break;
-            }
-            if (message.createdTimestamp >= startedAt) continue; // logged live
-            logMessage(logEntry(message));
-            if (!message.author.bot) notePerson(message.author.id, displayName(message));
-            total++;
-          }
-          if (reachedEnd || page.size < 100) break;
-          before = page.last().id;
-        }
-      } catch (err) {
-        console.error(`[backfill] Skipped #${channel.name}:`, err.message);
-      }
+  for (const channel of readableChannels(discord)) {
+    try {
+      total += await backfillChannel(channel, {
+        sinceTs: Math.max(lastLogged.get(channel.id) ?? 0, floor),
+        untilTs: startedAt,
+        botUserId: discord.user.id,
+        onMessage: (message) => {
+          if (!message.author.bot) notePerson(message.author.id, displayName(message));
+        },
+      });
+    } catch (err) {
+      console.error(`[backfill] Skipped #${channel.name}:`, err.message);
     }
   }
   console.log(`[backfill] Added ${total} missed message(s).`);
 }
 
+/**
+ * One-time update of the !predict skill saved before voice profiles existed: point it at the profiles
+ * and spread sampling, and fix its "14 days back" wording. Logged like any other edit, and it only
+ * touches the old text, so later edits by people in the server are left alone.
+ */
+const PREDICT_PROMPT = `The input names a person (and optionally a topic or situation). Find them in the Known people list (by name or nickname). If not listed, say they need to post in the server or be @mentioned once. Goal: PREDICT what they would say or do next, not echo what they already said. Steps: (1) Use their voice profile (loaded for you below, or call get_voice_profile with their user ID): it describes how they talk across the whole chat log, with real quotes, and is your main source for their voice, opinions, running jokes, and how they react to being teased, wrong, or surprised. (2) If they have no profile, or for the topic at hand, use sample_chat_log with their user_id (skip_recent_days 2, and a query for the topic if there is one) to see messages spread across the whole log, not just the latest ones. (3) Read the recent channel messages only to understand the current situation and what they have ALREADY said; treat those as context, never as material to repeat. (4) Predict what NEW thing they'd most likely say next given the latest development, extrapolating from their long-term patterns rather than their last few messages. (5) Hard rules: do not restate, paraphrase, or quote any point they already made in the recent messages; the prediction must add new content such as a reaction, a pivot, a joke, a counterargument, or a follow-up. Don't invent wild claims out of character. (6) Output format: start with "Predicted [name]:" then the prediction in their voice (1-3 sentences), matching their real message length, capitalization, and punctuation. Do NOT add a confidence line or any explanation after it; just let the joke land. If they have little chat history, say so briefly. Keep it short and Discord-friendly.`;
+
+function upgradePredictSkill() {
+  const skill = activeItems("skill").find((s) => s.name === "predict");
+  if (!skill || !/up to 14 days back/.test(skill.text)) return;
+  const result = editItem(skill.id, { text: PREDICT_PROMPT, recentMessages: 15 }, { id: null, name: "bot update" });
+  if (result.error) console.error("[skills] Couldn't update !predict:", result.error);
+  else console.log(`[skills] Updated !predict (#${skill.id}) to use voice profiles and spread sampling.`);
+}
+
 discord.once(Events.ClientReady, async (client) => {
   console.log(`Logged in as ${client.user.tag}. Waiting for questions...`);
+  upgradePredictSkill();
   const run = () => summarizeChat().catch((err) => console.error("Summaries failed:", err));
   // Summarize only after the backfill, so missed messages make it into the summaries.
   await backfill(Date.now()).catch((err) => console.error("Backfill failed:", err));

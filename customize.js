@@ -1,6 +1,7 @@
 // The chat-editable layer: tools Claude uses to add/edit/remove rules, facts, and skills,
 // how they're shown to Claude in the system prompt, and the lists the bot posts itself.
-import { searchLog, searchSummaries, firstLoggedDay } from "./chatlog.js";
+import { searchLog, searchSummaries, sampleLog, firstLoggedDay } from "./chatlog.js";
+import { profileText, MIN_MESSAGES } from "./profiles.js";
 import {
   activeItems,
   removedItems,
@@ -111,7 +112,12 @@ export const CUSTOM_TOOLS = [
         prompt: {
           type: "string",
           description:
-            "What to do when it's run, as instructions to yourself. Whatever the person types after the name is the input, and if they run it as a reply, the message they replied to is included too. When it runs you can search the chat log and the web. Keep everything they asked for.",
+            "What to do when it's run, as instructions to yourself. Whatever the person types after the name is the input, and if they run it as a reply, the message they replied to is included too. When it runs you can search the chat log (latest matches, or samples spread across the year), look up people's voice profiles, and search the web. If the skill imitates or writes as people, say \"use their voice profiles\" in the prompt: the profiles of everyone named in the input are then loaded automatically. Keep everything they asked for.",
+        },
+        recent_messages: {
+          type: "integer",
+          description:
+            "How many of the channel's most recent messages the skill sees as background: -1 = the default (30), 0 = none (for skills that shouldn't be swayed by the current chat), or a smaller number. Use -1 unless they ask, or the skill is about long-term patterns rather than the current conversation.",
         },
         description: {
           type: "string",
@@ -119,7 +125,7 @@ export const CUSTOM_TOOLS = [
         },
         nothing_else_to_answer: NOTHING_ELSE,
       },
-      required: ["name", "prompt", "description", "nothing_else_to_answer"],
+      required: ["name", "prompt", "description", "recent_messages", "nothing_else_to_answer"],
       additionalProperties: false,
     },
     strict: true,
@@ -141,6 +147,7 @@ export const CUSTOM_TOOLS = [
         expires_in_minutes: nullable({ type: "integer", description: "New time limit in minutes from now; 0 to make it permanent." }),
         name: nullable({ type: "string", description: "Skills only: new name." }),
         description: nullable({ type: "string", description: "Skills only: new one-line description for the !help list." }),
+        recent_messages: nullable({ type: "integer", description: "Skills only: how many recent channel messages it sees (-1 = default 30, 0 = none)." }),
         nothing_else_to_answer: NOTHING_ELSE,
       },
       required: [
@@ -155,6 +162,7 @@ export const CUSTOM_TOOLS = [
         "expires_in_minutes",
         "name",
         "description",
+        "recent_messages",
         "nothing_else_to_answer",
       ],
       additionalProperties: false,
@@ -202,6 +210,38 @@ export const CUSTOM_TOOLS = [
         },
       },
       required: ["query", "user_id", "this_channel_only", "days_back", "from_date", "to_date", "minutes_back"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "sample_chat_log",
+    description:
+      "Like search_chat_log, but returns messages spread evenly across every month of the log instead of the latest ones. Use it to learn someone's long-term habits, opinions and running jokes (e.g. for impersonating them) without being swayed by the current conversation. Also says how many matches each month has.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: 'Words that must all appear in the message (any case). "" = any message.' },
+        user_id: { type: "string", description: 'Only messages from this person (ID from Known people). "" = anyone.' },
+        this_channel_only: { type: "boolean" },
+        skip_recent_days: { type: "integer", description: "Leave out the last N days (e.g. 3 to ignore the current conversation). 0 = include everything." },
+        from_date: { type: "string", description: 'Only messages from this date "YYYY-MM-DD" on. "" = the whole log.' },
+        how_many: { type: "integer", description: "How many messages to return, 10 to 150. Default 60." },
+      },
+      required: ["query", "user_id", "this_channel_only", "skip_recent_days", "from_date", "how_many"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "get_voice_profile",
+    description: `Get the voice profiles of one or more people: how they talk (style, vocabulary, catchphrases, running jokes, opinions, how they react to teasing) plus real quotes, built from their messages across the whole log. Use it whenever you imitate, predict, or write as someone. Only people with ${MIN_MESSAGES}+ messages have one.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        user_ids: { type: "array", items: { type: "string" }, description: "User IDs from Known people." },
+      },
+      required: ["user_ids"],
       additionalProperties: false,
     },
     strict: true,
@@ -258,6 +298,7 @@ export function describe(item, { maxText = Infinity } = {}) {
   const tags = [item.kind === "skill" ? `skill !${item.name}` : item.kind];
   if (item.kind === "rule") tags.push(item.people.length ? `for ${names(item.people)}` : "for everyone");
   if (item.kind === "fact" && item.people.length) tags.push(`about ${names(item.people)}`);
+  if (item.kind === "skill" && item.recentMessages != null) tags.push(item.recentMessages === 0 ? "ignores recent chat" : `sees ${item.recentMessages} recent messages`);
   if (item.channel) tags.push(`only in #${item.channel.name}`);
   if (item.when) tags.push(`when: ${item.when}`);
   if (item.everyMessage) tags.push("chimes in on every message");
@@ -413,7 +454,7 @@ export function runCustomTool(block, ctx) {
       result = addItem({ kind: "fact", text: input.text, people: input.about }, ctx.by);
       break;
     case "add_skill":
-      result = addItem({ kind: "skill", name: input.name, text: input.prompt, description: input.description }, ctx.by);
+      result = addItem({ kind: "skill", name: input.name, text: input.prompt, description: input.description, recentMessages: input.recent_messages }, ctx.by);
       break;
     case "edit_item": {
       const changes = {
@@ -425,6 +466,7 @@ export function runCustomTool(block, ctx) {
         respond: input.chime_in_response,
         name: input.name,
         description: input.description,
+        recentMessages: input.recent_messages,
       };
       if (input.this_channel_only != null) changes.channel = channel(input.this_channel_only);
       if (input.expires_in_minutes != null) changes.expiresAt = expiry(input.expires_in_minutes);
@@ -459,6 +501,23 @@ export function runCustomTool(block, ctx) {
       if (!total) return { error: false, text: "No matching messages.", changed: false };
       const note = total > lines.length ? `${total} matches; showing the ${lines.length} most recent:\n` : "";
       return { error: false, text: note + lines.join("\n"), changed: false };
+    }
+    case "sample_chat_log": {
+      const { total, months, lines } = sampleLog({
+        query: input.query,
+        userId: input.user_id,
+        channelId: input.this_channel_only ? ctx.channel.id : null,
+        skipRecentDays: input.skip_recent_days,
+        fromDay: validDay(input.from_date),
+        limit: Math.min(Math.max(input.how_many || 60, 10), 150),
+      });
+      if (!total) return { error: false, text: `No matching messages. (The chat log starts ${firstLoggedDay() ?? "today"}.)`, changed: false };
+      const note = `${total} matches (per month: ${months.join(", ")}); ${lines.length === total ? "all of them" : `${lines.length} spread across those months`}:\n`;
+      return { error: false, text: note + lines.join("\n"), changed: false };
+    }
+    case "get_voice_profile": {
+      const texts = input.user_ids.map((id) => profileText(id) || `${personName(id)} (ID ${id}) has no voice profile (it needs ${MIN_MESSAGES}+ logged messages and someone running "!profiles build"); use sample_chat_log with their user_id instead.`);
+      return { error: false, text: texts.join("\n\n") || "No user IDs given.", changed: false };
     }
     case "search_summaries": {
       const { total, texts } = searchSummaries({ query: input.query, channelId: input.this_channel_only ? ctx.channel.id : null });
