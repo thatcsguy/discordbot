@@ -40,6 +40,7 @@ Anyone in the server can reshape Cwaude just by asking it. Everything they add g
 
 - **Rules** change how it behaves: "hey cwaude, for Sam always reply in pirate speak", "hey cwaude, in this channel keep answers to one sentence", "hey cwaude, when someone asks about food, recommend tacos". You don't need to @mention the person, as long as they've posted in the server since the bot started tracking (otherwise @mention them once).
 - **Chime-in rules** make it reply without being summoned: "hey cwaude, whenever anyone says pineapple pizza, reply 'gross'". The bot checks messages against the trigger words itself and only calls Claude when one matches.
+- **Watchers** are chime-in rules for people instead of words, usually with a time limit: "hey cwaude fact check everything Celia says for 5 mins, just react with a check or an X". They turn themselves off when the time is up (that shows in the change log too). Chime-ins run on the cheap model (`CHEAP_MODEL`, Haiku by default).
 - **Facts** are things it should know: "hey cwaude, remember Sam is vegetarian", "hey cwaude, Sammy is Sam's nickname".
 - **Skills** are reusable prompts you run by name: "hey cwaude, make a skill called roast: write a 3-line roast of whoever I name", then "hey cwaude roast Sam".
 
@@ -49,7 +50,17 @@ Managing them:
 - "hey cwaude change 3 to only apply to Celia" edits it in place.
 - "hey cwaude what changed recently?" shows who changed what and when.
 
-Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). Both are git-ignored. The core personality in `SYSTEM_PROMPT` can't be changed from chat; user rules layer on top of it. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
+## Channel awareness
+
+Cwaude follows the chat even when nobody's talking to it:
+- Every server message (not DMs) is written to a local log in `chatlog/`, one file per day, kept for 14 days.
+- When summoned, it sees the last 30 messages in that channel, plus summaries of the channel's last 3 days.
+- Every hour, the cheap model folds new messages into each channel's daily summary (`summaries.json`). Only channels with new messages cost anything; a busy day is well under a cent on Haiku.
+- For anything older or more specific ("what restaurant did Celia mention last week?"), it can search the log.
+
+Let your friends know the bot keeps this log. It never leaves your computer except for the summary requests to the API.
+
+Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). These, and the chat log and summaries, are all git-ignored. The core personality in `SYSTEM_PROMPT` can't be changed from chat; user rules layer on top of it. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
 
 ## Tweaking
 

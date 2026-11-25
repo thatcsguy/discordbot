@@ -22,6 +22,9 @@ export const KINDS = ["rule", "fact", "skill"];
  * - channel: { id, name } or null for everywhere.
  * - when: plain-English condition ("when someone asks about food") or null.
  * - keywords: words that make the bot chime in unprompted (rules only). Empty = only when summoned.
+ * - everyMessage: rules only; chime in on EVERY message from the rule's people (or everyone), e.g. fact-checking.
+ * - respond: rules only, for chime-ins: "reply" (post a message) or "react" (just add an emoji reaction).
+ * - expiresAt: ISO time after which the item turns itself off ("for 5 minutes"), or null.
  * Numbers come from one shared counter and are never reused, so "remove 3" is always unambiguous.
  */
 let data = { nextId: 1, items: [], people: {} };
@@ -81,6 +84,9 @@ function blankItem(fields, by, now) {
     channel: fields.channel ?? null,
     when: fields.when?.trim() || null,
     keywords: cleanKeywords(fields.keywords),
+    everyMessage: Boolean(fields.everyMessage),
+    respond: fields.respond === "react" ? "react" : "reply",
+    expiresAt: fields.expiresAt ?? null,
     removed: false,
     createdBy: by,
     createdAt: now,
@@ -113,15 +119,35 @@ export function personName(userId) {
 
 // ---------- items ----------
 
+const TIMER = { id: null, name: "timer" };
+
+/** Turn off anything whose time is up, logging it like any other change. */
+function expireDue() {
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const item of data.items) {
+    if (item.removed || !item.expiresAt || item.expiresAt > now) continue;
+    item.removed = true;
+    item.updatedAt = now;
+    writeLog({ at: now, by: TIMER, action: "expire", id: item.id, item });
+    console.log(`[store] #${item.id} expired.`);
+    changed = true;
+  }
+  if (changed) save();
+}
+
 export function activeItems(kind) {
+  expireDue();
   return data.items.filter((item) => !item.removed && (!kind || item.kind === kind));
 }
 
 export function removedItems() {
+  expireDue();
   return data.items.filter((item) => item.removed);
 }
 
 export function getItem(id) {
+  expireDue();
   return data.items.find((item) => item.id === id);
 }
 
@@ -163,6 +189,9 @@ export function editItem(id, changes, by) {
   if (changes.channel !== undefined) item.channel = changes.channel;
   if (changes.when != null) item.when = changes.when.trim() || null;
   if (changes.keywords != null) item.keywords = cleanKeywords(changes.keywords);
+  if (changes.everyMessage != null) item.everyMessage = changes.everyMessage;
+  if (changes.respond != null) item.respond = changes.respond === "react" ? "react" : "reply";
+  if (changes.expiresAt !== undefined) item.expiresAt = changes.expiresAt;
   item.updatedAt = new Date().toISOString();
   save();
   writeLog({ at: item.updatedAt, by, action: "edit", id, before, after: item });
@@ -179,6 +208,8 @@ export function setRemoved(id, removed, by) {
     if (clash) return { error: `Can't restore: skill "${item.name}" is now #${clash.id}.` };
   }
   item.removed = removed;
+  // Restoring something that timed out brings it back for good; set a new time limit by editing it.
+  if (!removed && item.expiresAt && item.expiresAt <= new Date().toISOString()) item.expiresAt = null;
   item.updatedAt = new Date().toISOString();
   save();
   writeLog({ at: item.updatedAt, by, action: removed ? "remove" : "restore", id, item });

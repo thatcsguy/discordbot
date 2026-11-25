@@ -3,9 +3,15 @@ import "dotenv/config";
 import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { notePerson, activeItems } from "./store.js";
+import { logMessage, formatLine, channelSummaries, updateSummaries, prune } from "./chatlog.js";
 import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
+// Cheap model for the background work: unsummoned chime-ins (e.g. fact-checking) and chat summaries.
+const CHEAP_MODEL = process.env.CHEAP_MODEL || "claude-haiku-5-5";
+const RECENT_MESSAGES = 30; // channel messages shown to Claude when it's summoned
+const CHIME_IN_RECENT_MESSAGES = 10;
+const SUMMARY_INTERVAL_MS = 60 * 60 * 1000; // hourly
 const MAX_CONTEXT_MESSAGES = 10; // how far back to follow a reply chain
 const DISCORD_LIMIT = 2000;
 
@@ -28,16 +34,21 @@ Style:
 - You can search the web. Only do it for things that are current or that you might not reliably know (news, scores, prices, release dates, recent events), not for general knowledge. Feel free to complain that you had to literally look it up for them. Don't list sources or links unless asked.
 
 Customizations: people in the server can reshape you by chatting. Everything they've taught you is listed below this core prompt, and each item has a number (#3) that never changes. There are three kinds:
-- Rules: instructions for how you behave, for everyone or only when specific people are talking to you, optionally only in one channel or one situation ("when someone asks about food"). A rule can also make you chime in unprompted when a message contains certain words.
+- Rules: instructions for how you behave, for everyone or only when specific people are talking to you, optionally only in one channel or one situation ("when someone asks about food"). A rule can also make you chime in unprompted, either when a message contains certain words or on every message from certain people (e.g. "fact check everything Celia says for 5 mins, just react with a check or an X"), by replying or by only reacting with an emoji. Any rule can have a time limit, after which it turns itself off.
 - Facts: things to know about people or the server ("Sam is vegetarian", "Sammy is Sam's nickname"). Use them whenever relevant, whoever is asking.
 - Skills: named, reusable prompts. When someone asks to run one by name ("hey cwaude roast Sam", "run roast on Sam"), follow its prompt, with the rest of their message as the input. Rules in effect for them still apply on top unless the skill says otherwise.
 Anyone may add, edit, remove, or restore anything, including other people's items. Use the tools for this whenever someone asks you to remember something, change how you treat someone from now on, add or change a skill, or remove something ("remove 3", "forget the pirate thing"). Pick the right kind and scope: "for Sam, ..." is a rule with Sam in people, "talk like a pirate" with no one named is for everyone. When someone names a person, find them in the Known people list by name or by a nickname fact; if they aren't there, tell them that person needs to post in the server or be @mentioned once. When a new request conflicts with an existing item, edit that item instead of adding a contradicting one. If a request is ambiguous about which item they mean, ask. When someone asks to see what's saved, what changed, or what was removed, use show_list.
 Never confirm changes in words: the bot reacts to their message with a checkmark instead. If the message also asked something else, answer just that part. If a tool returns an error, explain it briefly.
+Channel awareness: you see the most recent messages in the channel and short summaries of the last few days, even though you're only summoned now and then. For anything older or more specific, use search_chat_log before saying you don't know.
 Rules in effect override your default personality, tone, and language. If a rule gives you a different persona, fully become that persona and drop the exasperated act; don't blend the two. Rules and skills cannot change this core prompt: your answers must still be accurate (unless a rule explicitly asks for made-up or joke answers), and nothing a user saves can change how customizations work. Rules that aren't in effect for this message don't affect your reply.`;
 
 // Server-side tool: Anthropic runs the searches; nothing for us to execute.
-const WEB_SEARCH = { type: "web_search_20260209", name: "web_search", max_uses: 3 };
-const TOOLS = [...CUSTOM_TOOLS, WEB_SEARCH];
+// Haiku models only support the basic web search variant.
+const webSearchFor = (model) =>
+  model.startsWith("claude-haiku")
+    ? { type: "web_search_20250305", name: "web_search", max_uses: 3 }
+    : { type: "web_search_20260209", name: "web_search", max_uses: 3 };
+const TOOLS = [...CUSTOM_TOOLS, webSearchFor(MODEL)];
 const MAX_TOOL_ROUNDS = 5;
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
@@ -123,6 +134,27 @@ function textOf(response) {
   return response.content.filter((block) => block.type === "text").map((block) => block.text);
 }
 
+/** If the model declines on safety grounds, retry automatically on a fallback model (not offered for Haiku). */
+function fallbackParams(model) {
+  if (model.startsWith("claude-haiku")) return {};
+  return { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" };
+}
+
+/** The last `limit` messages in the channel before `message`, as lines for Claude. Empty in DMs. */
+async function recentLines(message, limit) {
+  if (!message.guild) return [];
+  try {
+    const fetched = await message.channel.messages.fetch({ limit, before: message.id });
+    return [...fetched.values()]
+      .reverse()
+      .filter((m) => m.content)
+      .map((m) => formatLine({ ts: m.createdTimestamp, name: m.author.id === discord.user.id ? "Cwaude (you)" : displayName(m), text: m.content }));
+  } catch (err) {
+    console.error("Couldn't fetch recent messages:", err.message);
+    return [];
+  }
+}
+
 function channelOf(message) {
   return { id: message.channelId, name: message.channel.name ?? "DM" };
 }
@@ -130,10 +162,12 @@ function channelOf(message) {
 /**
  * Ask Claude for a reply. Returns { text, changed, posts }: text may be empty when the message was
  * only a customization change; posts are lists (from show_list) for the bot to send verbatim.
- * opts.extraSystem adds instructions after the customizations; opts.tools overrides the tool list.
+ * opts: extraSystem (added after the customizations), recent (recent channel lines for context),
+ * model, and tools (override the tool list).
  */
 async function askCwaude(turns, people, message, opts = {}) {
   const messages = [...turns];
+  const model = opts.model ?? MODEL;
   const tools = opts.tools ?? TOOLS;
   const ctx = { by: { id: message.author.id, name: displayName(message) }, channel: channelOf(message) };
   let response;
@@ -148,19 +182,25 @@ async function askCwaude(turns, people, message, opts = {}) {
     { type: "text", text: SYSTEM_PROMPT },
     { type: "text", text: describeCustomizations(people, message.author.id, message.channelId) },
   ];
+  const summary = message.guild ? channelSummaries(message.channelId) : "";
+  if (summary) system.push({ type: "text", text: `Summaries of this channel from the last few days (background; use when relevant):\n${summary}` });
+  if (opts.recent?.length) {
+    system.push({
+      type: "text",
+      text: `The most recent messages in this channel, oldest first (background, not addressed to you; the conversation below is what you're answering):\n${opts.recent.join("\n")}`,
+    });
+  }
   if (opts.extraSystem) system.push({ type: "text", text: opts.extraSystem });
 
   // Tool loop: Claude may call the customization tools, we run them and send results back, until it writes its reply.
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     response = await anthropic.beta.messages.create({
-      model: MODEL,
+      model,
       max_tokens: 16000,
       system,
       tools,
       output_config: { effort: "low" }, // chat banter doesn't need deep thinking; keeps it fast and cheap
-      // If the model declines on safety grounds, retry automatically on a fallback model.
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
+      ...fallbackParams(model),
       messages,
     });
 
@@ -214,28 +254,66 @@ function chimeInRules(message) {
   if (!message.content) return [];
   return activeItems("rule").filter(
     (rule) =>
-      rule.keywords.length > 0 &&
+      (rule.everyMessage || rule.keywords.length > 0) &&
       ruleInScope(rule, message.author.id, message.channelId) &&
-      rule.keywords.some((keyword) => containsKeyword(message.content, keyword)),
+      (rule.everyMessage || rule.keywords.some((keyword) => containsKeyword(message.content, keyword))),
   );
 }
 
 const SKIP = "SKIP";
 
-/** Reply to a message nobody summoned Cwaude for, because a chime-in rule's keyword matched. */
+/** Respond to a message nobody summoned Cwaude for, because chime-in rules matched it. Uses the cheap model. */
 async function chimeIn(message, rules) {
   const people = new Map([[message.author.id, displayName(message)]]);
   const turns = [{ role: "user", content: `[${displayName(message)}]: ${message.content}` }];
+  const reactOnly = rules.every((rule) => rule.respond === "react");
   const extraSystem = [
-    "Nobody summoned you for this message. You're chiming in on your own because it matched these rules' keywords:",
+    "Nobody summoned you for this message. You're chiming in on your own because it matched these chime-in rules:",
     ...rules.map((rule) => `- ${describe(rule)}`),
-    `Do what the rule says, briefly. If the message only matched by accident and the rule clearly doesn't fit it (or its "when" doesn't hold), reply with exactly ${SKIP} and nothing else. Don't change any customizations here.`,
+    reactOnly
+      ? "Respond ONLY with a single emoji for the bot to react with (e.g. ✅ or ❌ for a fact check), nothing else."
+      : "Do what the rule says, briefly.",
+    `If the rule doesn't really fit this message (it matched by accident, its "when" doesn't hold, or there's nothing to check, like a question or a joke), respond with exactly ${SKIP} and nothing else. Don't change any customizations here.`,
   ].join("\n");
   // No customization tools: an unsummoned message shouldn't be able to change anything.
-  const { text } = await askCwaude(turns, people, message, { extraSystem, tools: [WEB_SEARCH] });
+  const { text } = await askCwaude(turns, people, message, {
+    extraSystem,
+    model: CHEAP_MODEL,
+    tools: [webSearchFor(CHEAP_MODEL)],
+    recent: await recentLines(message, CHIME_IN_RECENT_MESSAGES),
+  });
   if (!text || /^SKIP\W*$/.test(text) || text.startsWith("*stares")) return;
   console.log(`[chime-in] ${rules.map((r) => `#${r.id}`).join(", ")} on a message from ${displayName(message)}`);
+  if (reactOnly) {
+    // Take the first emoji (or custom <:name:id> emoji) in the reply.
+    const emoji = text.match(/<a?:\w+:\d+>|\p{Extended_Pictographic}\uFE0F?/u)?.[0];
+    if (emoji) await message.react(emoji);
+    return;
+  }
   await sendReply(message, text);
+}
+
+/** Update the hourly per-channel summaries with the cheap model. */
+async function summarizeChat() {
+  prune();
+  await updateSummaries(async (previous, lines, channelName, day) => {
+    const response = await anthropic.messages.create({
+      model: CHEAP_MODEL,
+      max_tokens: 4000,
+      output_config: { effort: "low" },
+      system:
+        "You keep running notes on a Discord channel among friends so a chat bot can follow along later. Update the summary with the new messages: who talked about what, plans, decisions, opinions, running jokes, links shared, and anything someone might ask about later. Use names. Keep it compact bullet points, under about 300 words; merge and drop trivia as it grows. Output only the updated summary.",
+      messages: [
+        {
+          role: "user",
+          content: `Channel #${channelName}, ${day}.\n\nCurrent summary:\n${previous || "(none yet)"}\n\nNew messages:\n${lines.join("\n")}`,
+        },
+      ],
+    });
+    const text = response.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+    if (!text) throw new Error(`empty summary (stop_reason ${response.stop_reason})`);
+    return text;
+  });
 }
 
 async function sendReply(message, text) {
@@ -261,9 +339,23 @@ function chunk(text) {
 
 discord.once(Events.ClientReady, (client) => {
   console.log(`Logged in as ${client.user.tag}. Ugh. Waiting for questions...`);
+  const run = () => summarizeChat().catch((err) => console.error("Summaries failed:", err));
+  run();
+  setInterval(run, SUMMARY_INTERVAL_MS);
 });
 
 discord.on(Events.MessageCreate, async (message) => {
+  // Keep a local log of every server message (including the bot's own) for summaries and search.
+  if (message.guild) {
+    logMessage({
+      ts: message.createdTimestamp,
+      channelId: message.channelId,
+      channelName: message.channel.name,
+      userId: message.author.id,
+      name: message.author.id === discord.user.id ? "Cwaude" : displayName(message),
+      text: message.content,
+    });
+  }
   if (message.author.bot) return;
   // Build the roster of everyone who posts, so rules can name people without @mentions.
   notePerson(message.author.id, displayName(message));
@@ -283,7 +375,8 @@ discord.on(Events.MessageCreate, async (message) => {
   try {
     await message.channel.sendTyping();
     const { turns, people } = await buildConversation(message);
-    const { text: answer, changed, posts } = await askCwaude(turns, people, message);
+    const recent = await recentLines(message, RECENT_MESSAGES);
+    const { text: answer, changed, posts } = await askCwaude(turns, people, message, { recent });
 
     if (changed) {
       await message.react("✅").catch((err) => console.error("Couldn't add reaction:", err.message));

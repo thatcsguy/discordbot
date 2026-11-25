@@ -1,5 +1,6 @@
 // The chat-editable layer: tools Claude uses to add/edit/remove rules, facts, and skills,
 // how they're shown to Claude in the system prompt, and the lists the bot posts itself.
+import { searchLog } from "./chatlog.js";
 import {
   activeItems,
   removedItems,
@@ -48,9 +49,33 @@ export const CUSTOM_TOOLS = [
           description:
             'Only if they want you to respond WITHOUT being summoned (e.g. "whenever anyone says pineapple pizza, say gross"): the words or short phrases that trigger it, e.g. ["pineapple pizza"]. Otherwise an empty array.',
         },
+        chime_in_on_every_message: {
+          type: "boolean",
+          description:
+            'true if you should respond, unsummoned, to EVERY message from the rule\'s people (or everyone if people is empty), e.g. "fact check everything Celia says". Usually false.',
+        },
+        chime_in_response: {
+          type: "string",
+          enum: ["reply", "react"],
+          description: 'For chime-ins: "react" if they want just an emoji reaction (e.g. a check or an X), otherwise "reply".',
+        },
+        expires_in_minutes: nullable({
+          type: "integer",
+          description: 'If they gave a time limit ("for 5 mins", "for the next hour"), that many minutes. null = permanent.',
+        }),
         nothing_else_to_answer: NOTHING_ELSE,
       },
-      required: ["text", "people", "this_channel_only", "when", "chime_in_keywords", "nothing_else_to_answer"],
+      required: [
+        "text",
+        "people",
+        "this_channel_only",
+        "when",
+        "chime_in_keywords",
+        "chime_in_on_every_message",
+        "chime_in_response",
+        "expires_in_minutes",
+        "nothing_else_to_answer",
+      ],
       additionalProperties: false,
     },
     strict: true,
@@ -103,10 +128,25 @@ export const CUSTOM_TOOLS = [
         this_channel_only: nullable({ type: "boolean", description: "true = only this channel, false = everywhere." }),
         when: nullable({ type: "string", description: 'New situation, or "" to make it apply always.' }),
         chime_in_keywords: nullable({ type: "array", items: { type: "string" }, description: "New trigger words ([] to stop chiming in)." }),
+        chime_in_on_every_message: nullable({ type: "boolean", description: "Rules only: respond unsummoned to every message from its people." }),
+        chime_in_response: nullable({ type: "string", enum: ["reply", "react"], description: "Rules only: how to chime in." }),
+        expires_in_minutes: nullable({ type: "integer", description: "New time limit in minutes from now; 0 to make it permanent." }),
         name: nullable({ type: "string", description: "Skills only: new name." }),
         nothing_else_to_answer: NOTHING_ELSE,
       },
-      required: ["id", "text", "people", "this_channel_only", "when", "chime_in_keywords", "name", "nothing_else_to_answer"],
+      required: [
+        "id",
+        "text",
+        "people",
+        "this_channel_only",
+        "when",
+        "chime_in_keywords",
+        "chime_in_on_every_message",
+        "chime_in_response",
+        "expires_in_minutes",
+        "name",
+        "nothing_else_to_answer",
+      ],
       additionalProperties: false,
     },
     strict: true,
@@ -134,6 +174,23 @@ export const CUSTOM_TOOLS = [
     strict: true,
   },
   {
+    name: "search_chat_log",
+    description:
+      "Search what people have said in the server over the last two weeks (the bot keeps a local log). Use it when someone asks about something said earlier that isn't in the recent messages or summaries you were given. All filters are optional.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: nullable({ type: "string", description: "Words that must all appear in the message (any case). null = any message." }),
+        user_id: nullable({ type: "string", description: "Only messages from this person (ID from Known people)." }),
+        this_channel_only: { type: "boolean" },
+        days_back: { type: "integer", description: "How many days back to search, 1-14." },
+      },
+      required: ["query", "user_id", "this_channel_only", "days_back"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
     name: "show_list",
     description:
       'Post an exact, numbered list. Use it whenever someone asks to see/list rules, facts, skills, everything, what was removed, what changed recently, or the details of one item ("what\'s #4?"). The bot posts the list itself; don\'t repeat it in your reply.',
@@ -155,6 +212,8 @@ export const CUSTOM_TOOL_NAMES = new Set(CUSTOM_TOOLS.map((tool) => tool.name));
 
 // ---------- formatting ----------
 
+const timeFormat = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
 function names(ids) {
   return ids.map(personName).join(", ");
 }
@@ -170,7 +229,10 @@ export function describe(item, { maxText = Infinity } = {}) {
   if (item.kind === "fact" && item.people.length) tags.push(`about ${names(item.people)}`);
   if (item.channel) tags.push(`only in #${item.channel.name}`);
   if (item.when) tags.push(`when: ${item.when}`);
-  if (item.keywords.length) tags.push(`chimes in on: ${item.keywords.map((k) => `"${k}"`).join(", ")}`);
+  if (item.everyMessage) tags.push("chimes in on every message");
+  else if (item.keywords.length) tags.push(`chimes in on: ${item.keywords.map((k) => `"${k}"`).join(", ")}`);
+  if ((item.everyMessage || item.keywords.length) && item.respond === "react") tags.push("reacts only");
+  if (item.expiresAt) tags.push(`${item.removed ? "ended" : "until"} ${timeFormat.format(new Date(item.expiresAt))}`);
   return `#${item.id} [${tags.join(" | ")}] ${shorten(item.text, maxText)}`;
 }
 
@@ -184,7 +246,8 @@ export function ruleInScope(rule, userId, channelId) {
  * `conversation` maps the IDs of people in this conversation to their display names.
  */
 export function describeCustomizations(conversation, askerId, channelId) {
-  const lines = ["Known people (use these IDs when saving rules and facts):"];
+  const now = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date());
+  const lines = [`It is now ${now}.`, "", "Known people (use these IDs when saving rules and facts):"];
   for (const [id, { name }] of Object.entries(knownPeople())) {
     const marks = [];
     if (id === askerId) marks.push("the person talking to you right now");
@@ -193,7 +256,9 @@ export function describeCustomizations(conversation, askerId, channelId) {
   }
 
   const rules = activeItems("rule");
-  const inEffect = rules.filter((rule) => ruleInScope(rule, askerId, channelId));
+  // Chime-in rules are triggers the bot handles on its own for unsummoned messages, not reply behavior.
+  const isChimeIn = (rule) => rule.everyMessage || rule.keywords.length > 0;
+  const inEffect = rules.filter((rule) => !isChimeIn(rule) && ruleInScope(rule, askerId, channelId));
   const notInEffect = rules.filter((rule) => !inEffect.includes(rule));
   const facts = activeItems("fact");
   const skills = activeItems("skill");
@@ -207,7 +272,7 @@ export function describeCustomizations(conversation, askerId, channelId) {
   if (notInEffect.length) {
     lines.push(
       "",
-      "Other rules (they don't apply to this message because of who's talking or which channel this is; listed only so you can edit or remove them):",
+      "Other rules (chime-in rules, which the bot runs separately on messages nobody summoned you for, and rules that don't apply here because of who's talking or which channel this is; listed only so you can edit or remove them):",
       ...notInEffect.map((item) => `- ${describe(item)}`),
     );
   }
@@ -232,15 +297,13 @@ function section(title, items) {
   return [`**${title}:**`, ...items.map((item) => describe(item, { maxText: 200 }))];
 }
 
-const timeFormat = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-
 function describeChange(change) {
   const when = timeFormat.format(new Date(change.at));
-  const who = change.by?.name ?? "someone";
+  const who = change.action === "expire" ? "" : `${change.by?.name ?? "someone"} `;
   const item = change.after ?? change.item;
   const label = item.kind === "skill" ? `skill #${item.id} "${item.name}"` : `${item.kind} #${item.id}`;
-  const verb = { add: "added", edit: "edited", remove: "removed", restore: "restored" }[change.action] ?? change.action;
-  return `${when}: ${who} ${verb} ${label}: ${shorten(item.text, 120)}`;
+  const verb = { add: "added", edit: "edited", remove: "removed", restore: "restored", expire: "expired" }[change.action] ?? change.action;
+  return `${when}: ${who}${verb} ${label}: ${shorten(item.text, 120)}`;
 }
 
 export function renderList(what, id) {
@@ -282,12 +345,23 @@ export function runCustomTool(block, ctx) {
   const input = block.input;
   const fail = (text) => ({ error: true, text, changed: false });
   const channel = (only) => (only ? ctx.channel : null);
+  const expiry = (minutes) => (minutes > 0 ? new Date(Date.now() + minutes * 60000).toISOString() : null);
   let result;
 
   switch (block.name) {
     case "add_rule":
       result = addItem(
-        { kind: "rule", text: input.text, people: input.people, channel: channel(input.this_channel_only), when: input.when, keywords: input.chime_in_keywords },
+        {
+          kind: "rule",
+          text: input.text,
+          people: input.people,
+          channel: channel(input.this_channel_only),
+          when: input.when,
+          keywords: input.chime_in_keywords,
+          everyMessage: input.chime_in_on_every_message,
+          respond: input.chime_in_response,
+          expiresAt: expiry(input.expires_in_minutes),
+        },
         ctx.by,
       );
       break;
@@ -298,8 +372,17 @@ export function runCustomTool(block, ctx) {
       result = addItem({ kind: "skill", name: input.name, text: input.prompt }, ctx.by);
       break;
     case "edit_item": {
-      const changes = { text: input.text, people: input.people, when: input.when, keywords: input.chime_in_keywords, name: input.name };
+      const changes = {
+        text: input.text,
+        people: input.people,
+        when: input.when,
+        keywords: input.chime_in_keywords,
+        everyMessage: input.chime_in_on_every_message,
+        respond: input.chime_in_response,
+        name: input.name,
+      };
       if (input.this_channel_only != null) changes.channel = channel(input.this_channel_only);
+      if (input.expires_in_minutes != null) changes.expiresAt = expiry(input.expires_in_minutes);
       result = editItem(input.id, changes, ctx.by);
       break;
     }
@@ -317,6 +400,17 @@ export function runCustomTool(block, ctx) {
       const text = [done.length ? `${verb} ${done.join(", ")}.` : "", ...problems].filter(Boolean).join(" ");
       if (done.length) console.log(`[custom] ${ctx.by.name} ${verb.toLowerCase()} ${done.join(", ")}`);
       return { error: problems.length > 0, text, changed: done.length > 0 };
+    }
+    case "search_chat_log": {
+      const { total, lines } = searchLog({
+        query: input.query,
+        userId: input.user_id,
+        channelId: input.this_channel_only ? ctx.channel.id : null,
+        daysBack: input.days_back,
+      });
+      if (!total) return { error: false, text: "No matching messages.", changed: false };
+      const note = total > lines.length ? `${total} matches; showing the ${lines.length} most recent:\n` : "";
+      return { error: false, text: note + lines.join("\n"), changed: false };
     }
     case "show_list":
       return { error: false, text: "The bot has posted the list. Don't repeat it.", changed: false, post: renderList(input.what, input.id) };
