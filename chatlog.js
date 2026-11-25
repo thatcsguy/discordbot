@@ -50,13 +50,23 @@ function readDay(day) {
       // a half-written line from a crash; skip it
     }
   }
-  return entries;
+  // Backfilled messages are appended after live ones, so order by time rather than by line.
+  return entries.sort((a, b) => a.ts - b.ts);
 }
 
 function lastDays(n) {
   const days = [];
   for (let i = n - 1; i >= 0; i--) days.push(dayOf(Date.now() - i * 86400000));
   return days;
+}
+
+/** The newest logged message time per channel, so a restart knows what it missed. */
+export function lastLoggedByChannel() {
+  const last = new Map();
+  for (const day of lastDays(KEEP_DAYS)) {
+    for (const entry of readDay(day)) last.set(entry.channelId, Math.max(last.get(entry.channelId) ?? 0, entry.ts));
+  }
+  return last;
 }
 
 /** Delete log files and summaries older than KEEP_DAYS. */
@@ -123,7 +133,7 @@ export function channelSummaries(channelId, days = 3) {
 export async function updateSummaries(summarize) {
   const startedAt = Date.now();
   const groups = new Map(); // "channelId|day" -> entries
-  for (const day of lastDays(2)) {
+  for (const day of lastDays(KEEP_DAYS)) {
     for (const entry of readDay(day)) {
       if (entry.ts <= (summaries.channels[entry.channelId]?.lastTs ?? 0) || entry.ts > startedAt) continue;
       const key = `${entry.channelId}|${day}`;

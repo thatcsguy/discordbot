@@ -1,9 +1,9 @@
 import "./log.js";
 import "dotenv/config";
-import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
+import { Client, Events, GatewayIntentBits, Partials, PermissionFlagsBits } from "discord.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { notePerson, activeItems } from "./store.js";
-import { logMessage, formatLine, channelSummaries, updateSummaries, prune } from "./chatlog.js";
+import { logMessage, formatLine, channelSummaries, updateSummaries, prune, lastLoggedByChannel } from "./chatlog.js";
 import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
@@ -12,6 +12,7 @@ const CHEAP_MODEL = process.env.CHEAP_MODEL || "claude-haiku-5-5";
 const RECENT_MESSAGES = 30; // channel messages shown to Claude when it's summoned
 const CHIME_IN_RECENT_MESSAGES = 10;
 const SUMMARY_INTERVAL_MS = 60 * 60 * 1000; // hourly
+const BACKFILL_DAYS = 7; // on startup, fetch messages missed while the bot was off, up to this far back
 const MAX_CONTEXT_MESSAGES = 10; // how far back to follow a reply chain
 const DISCORD_LIMIT = 2000;
 
@@ -337,25 +338,71 @@ function chunk(text) {
   return parts;
 }
 
-discord.once(Events.ClientReady, (client) => {
+function logEntry(message) {
+  return {
+    ts: message.createdTimestamp,
+    channelId: message.channelId,
+    channelName: message.channel.name,
+    userId: message.author.id,
+    name: message.author.id === discord.user.id ? "Cwaude" : displayName(message),
+    text: message.content,
+  };
+}
+
+/**
+ * Fetch, from Discord, the messages posted while the bot was off (since the last one logged in each
+ * channel, at most BACKFILL_DAYS back) and add them to the log. This uses no tokens; the next
+ * summary run folds them in. Messages that arrive live during the backfill are logged as usual.
+ */
+async function backfill(startedAt) {
+  const lastLogged = lastLoggedByChannel();
+  const floor = startedAt - BACKFILL_DAYS * 86400000;
+  let total = 0;
+  for (const guild of discord.guilds.cache.values()) {
+    for (const channel of guild.channels.cache.values()) {
+      if (!channel.isTextBased() || !channel.viewable) continue;
+      if (!channel.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.ReadMessageHistory)) continue;
+      const since = Math.max(lastLogged.get(channel.id) ?? 0, floor);
+      let before;
+      try {
+        // Page backwards, newest first, 100 at a time, until we reach what we already have.
+        for (;;) {
+          const page = await channel.messages.fetch({ limit: 100, ...(before && { before }) });
+          if (page.size === 0) break;
+          let reachedEnd = false;
+          for (const message of page.values()) {
+            if (message.createdTimestamp <= since) {
+              reachedEnd = true;
+              break;
+            }
+            if (message.createdTimestamp >= startedAt) continue; // logged live
+            logMessage(logEntry(message));
+            if (!message.author.bot) notePerson(message.author.id, displayName(message));
+            total++;
+          }
+          if (reachedEnd || page.size < 100) break;
+          before = page.last().id;
+        }
+      } catch (err) {
+        console.error(`[backfill] Skipped #${channel.name}:`, err.message);
+      }
+    }
+  }
+  console.log(`[backfill] Added ${total} missed message(s).`);
+}
+
+discord.once(Events.ClientReady, async (client) => {
   console.log(`Logged in as ${client.user.tag}. Ugh. Waiting for questions...`);
   const run = () => summarizeChat().catch((err) => console.error("Summaries failed:", err));
+  // Summarize only after the backfill, so missed messages make it into the summaries.
+  await backfill(Date.now()).catch((err) => console.error("Backfill failed:", err));
   run();
   setInterval(run, SUMMARY_INTERVAL_MS);
 });
 
 discord.on(Events.MessageCreate, async (message) => {
   // Keep a local log of every server message (including the bot's own) for summaries and search.
-  if (message.guild) {
-    logMessage({
-      ts: message.createdTimestamp,
-      channelId: message.channelId,
-      channelName: message.channel.name,
-      userId: message.author.id,
-      name: message.author.id === discord.user.id ? "Cwaude" : displayName(message),
-      text: message.content,
-    });
-  }
+  if (message.guild) logMessage(logEntry(message));
   if (message.author.bot) return;
   // Build the roster of everyone who posts, so rules can name people without @mentions.
   notePerson(message.author.id, displayName(message));

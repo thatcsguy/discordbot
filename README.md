@@ -54,6 +54,7 @@ Managing them:
 
 Cwaude follows the chat even when nobody's talking to it:
 - Every server message (not DMs) is written to a local log in `chatlog/`, one file per day, kept for 14 days.
+- On startup it fetches from Discord whatever it missed while it was off (up to 7 days back per channel). That uses no tokens, and the next summary run catches up on it.
 - When summoned, it sees the last 30 messages in that channel, plus summaries of the channel's last 3 days.
 - Every hour, the cheap model folds new messages into each channel's daily summary (`summaries.json`). Only channels with new messages cost anything; a busy day is well under a cent on Haiku.
 - For anything older or more specific ("what restaurant did Celia mention last week?"), it can search the log.
