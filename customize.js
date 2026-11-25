@@ -1,6 +1,6 @@
 // The chat-editable layer: tools Claude uses to add/edit/remove rules, facts, and skills,
 // how they're shown to Claude in the system prompt, and the lists the bot posts itself.
-import { searchLog } from "./chatlog.js";
+import { searchLog, searchSummaries, firstLoggedDay } from "./chatlog.js";
 import {
   activeItems,
   removedItems,
@@ -176,20 +176,37 @@ export const CUSTOM_TOOLS = [
   {
     name: "search_chat_log",
     description:
-      "Search what people have said in the server over the last two weeks (the bot keeps a local log). Use it when someone asks about something said earlier that isn't in the recent messages or summaries you were given. All filters are optional.",
+      "Search the exact messages people have said in the server (the bot keeps a local log of everything since it started logging). Use it when someone asks about something said earlier that isn't in the recent messages or summaries you were given. All filters are optional. For older or vaguer questions (\"when did we plan that trip?\"), search_summaries first can find the right dates to search here.",
     input_schema: {
       type: "object",
       properties: {
         query: nullable({ type: "string", description: "Words that must all appear in the message (any case). null = any message." }),
         user_id: nullable({ type: "string", description: "Only messages from this person (ID from Known people)." }),
         this_channel_only: { type: "boolean" },
-        days_back: { type: "integer", description: "How many days back to search, 1-14." },
+        days_back: { type: "integer", description: "How many days back from today to search (any number). Ignored if from_date or minutes_back is set." },
+        from_date: nullable({ type: "string", description: 'Start date "YYYY-MM-DD" (inclusive) for searching a specific past period. null otherwise.' }),
+        to_date: nullable({ type: "string", description: 'End date "YYYY-MM-DD" (inclusive). null = today.' }),
         minutes_back: nullable({
           type: "integer",
           description: 'For recent things ("the last 5 minutes"): only messages from this many minutes ago until now. Overrides days_back. null otherwise.',
         }),
       },
-      required: ["query", "user_id", "this_channel_only", "days_back", "minutes_back"],
+      required: ["query", "user_id", "this_channel_only", "days_back", "from_date", "to_date", "minutes_back"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "search_summaries",
+    description:
+      "Search the long-term memory: the daily, weekly and monthly summaries of every channel, kept forever. Good for older or broad questions (\"what were we arguing about in March?\", \"has anyone talked about Japan?\") and for finding when something happened before searching the exact messages.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: nullable({ type: "string", description: "Words that must all appear in the summary (any case). null = the most recent summaries." }),
+        this_channel_only: { type: "boolean" },
+      },
+      required: ["query", "this_channel_only"],
       additionalProperties: false,
     },
     strict: true,
@@ -349,6 +366,7 @@ export function runCustomTool(block, ctx) {
   const input = block.input;
   const fail = (text) => ({ error: true, text, changed: false });
   const channel = (only) => (only ? ctx.channel : null);
+  const validDay = (day) => (/^\d{4}-\d{2}-\d{2}$/.test(day ?? "") ? day : null);
   const expiry = (minutes) => (minutes > 0 ? new Date(Date.now() + minutes * 60000).toISOString() : null);
   let result;
 
@@ -411,11 +429,19 @@ export function runCustomTool(block, ctx) {
         userId: input.user_id,
         channelId: input.this_channel_only ? ctx.channel.id : null,
         daysBack: input.days_back,
+        fromDay: validDay(input.from_date),
+        toDay: validDay(input.to_date),
         sinceTs: input.minutes_back > 0 ? Date.now() - input.minutes_back * 60000 : null,
       });
       if (!total) return { error: false, text: "No matching messages.", changed: false };
       const note = total > lines.length ? `${total} matches; showing the ${lines.length} most recent:\n` : "";
       return { error: false, text: note + lines.join("\n"), changed: false };
+    }
+    case "search_summaries": {
+      const { total, texts } = searchSummaries({ query: input.query, channelId: input.this_channel_only ? ctx.channel.id : null });
+      if (!total) return { error: false, text: `No matching summaries. (The chat log starts ${firstLoggedDay() ?? "today"}.)`, changed: false };
+      const note = total > texts.length ? `${total} matches; showing the ${texts.length} most recent:\n\n` : "";
+      return { error: false, text: note + texts.join("\n\n"), changed: false };
     }
     case "show_list":
       return { error: false, text: "The bot has posted the list. Don't repeat it.", changed: false, post: renderList(input.what, input.id) };

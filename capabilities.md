@@ -9,8 +9,8 @@ This is loaded into Cwaude's core prompt so it can explain itself accurately whe
 
 ## What it knows and remembers
 - The last 30 messages in the channel whenever it's summoned, not just the message it's replying to.
-- Short summaries of each channel for the last few days, updated hourly by a smaller, cheaper model.
-- A log of everything said in the server for the last 14 days, which it can search ("what restaurant did Celia mention last week?", "what did Sam say in the last 10 minutes?"). DMs aren't logged. The log stays on the computer running the bot.
+- Long-term memory: a log of everything said in the server since logging started, kept forever, which it can search by words, person, channel, and date ("what restaurant did Celia mention last week?", "what did Sam say in the last 10 minutes?", "what did we talk about on March 3rd?"). DMs aren't logged. The log stays on the computer running the bot.
+- Summaries of each channel: daily (updated hourly by a smaller, cheaper model), rolled up into weekly and monthly summaries that are kept forever. It sees the latest ones automatically and can search all of them ("what were we arguing about in March?").
 - If the bot was offline, on startup it catches up on up to 7 days of messages it missed.
 - Everything people have taught it: rules, facts, and skills (below).
 - Everyone who has posted in the server since logging started, so people can be named without @mentioning them.

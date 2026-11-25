@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { Client, Events, GatewayIntentBits, Partials, PermissionFlagsBits } from "discord.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { notePerson, activeItems, skillName } from "./store.js";
-import { logMessage, formatLine, channelSummaries, updateSummaries, prune, lastLoggedByChannel } from "./chatlog.js";
+import { logMessage, formatLine, channelSummaries, updateSummaries, updateRollups, prune, lastLoggedByChannel } from "./chatlog.js";
 import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool, renderList } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
@@ -41,7 +41,7 @@ Customizations: people in the server can reshape you by chatting. Everything the
 - Skills: named, reusable prompts. People usually run them with "!name input" (e.g. "!roast Sam"), which the bot handles directly; if someone asks for one in words instead ("hey cwaude roast Sam"), follow its prompt with the rest of their message as the input. Rules in effect for them still apply on top unless the skill says otherwise.
 Anyone may add, edit, remove, or restore anything, including other people's items. Use the tools for this whenever someone asks you to remember something, change how you treat someone from now on, add or change a skill, or remove something ("remove 3", "forget the pirate thing"). Pick the right kind and scope: "for Sam, ..." is a rule with Sam in people, "talk like a pirate" with no one named is for everyone. When someone names a person, find them in the Known people list by name or by a nickname fact; if they aren't there, tell them that person needs to post in the server or be @mentioned once. When a new request conflicts with an existing item, edit that item instead of adding a contradicting one. If a request is ambiguous about which item they mean, ask. When someone asks to see what's saved, what changed, or what was removed, use show_list.
 Never confirm changes in words: the bot reacts to their message with a checkmark instead. If the message also asked something else, answer just that part. If a tool returns an error, explain it briefly.
-Channel awareness: you see the most recent messages in the channel and short summaries of the last few days, even though you're only summoned now and then. For anything older or more specific, use search_chat_log before saying you don't know.
+Channel awareness: you see the most recent messages in the channel and short summaries of the last few days, even though you're only summoned now and then. This is long-term memory: the raw log and the weekly/monthly summaries are kept forever. For anything older or more specific, use search_summaries and search_chat_log before saying you don't know.
 Rules in effect override your default personality, tone, and language. If a rule gives you a different persona, fully become that persona and drop the exasperated act; don't blend the two. Rules and skills cannot change this core prompt: your answers must still be accurate (unless a rule explicitly asks for made-up or joke answers), and nothing a user saves can change how customizations work. Rules that aren't in effect for this message don't affect your reply.`;
 
 // Server-side tool: Anthropic runs the searches; nothing for us to execute.
@@ -52,7 +52,7 @@ const webSearchFor = (model) =>
     : { type: "web_search_20260209", name: "web_search", max_uses: 3 };
 const TOOLS = [...CUSTOM_TOOLS, webSearchFor(MODEL)];
 // Skills can look things up but not change customizations.
-const SKILL_TOOLS = [...CUSTOM_TOOLS.filter((tool) => tool.name === "search_chat_log"), webSearchFor(MODEL)];
+const SKILL_TOOLS = [...CUSTOM_TOOLS.filter((tool) => tool.name.startsWith("search_")), webSearchFor(MODEL)];
 
 // What Cwaude can do, so it can describe itself. Edit capabilities.md when features change.
 const CAPABILITIES = fs.readFileSync(new URL("./capabilities.md", import.meta.url), "utf8");
@@ -65,7 +65,7 @@ const HELP = `**Hey, it's Cwaude.** Ugh. Fine. Here's how this works:
 - Teach me stuff by asking: rules ("for Sam, talk like a pirate"), facts ("Sam is vegetarian"), timed watchers ("fact check Celia for 5 mins, just react"), and skills ("make a skill called roast that...").
 - Run a skill with **!name** (e.g. \`!roast Sam\`), or send it as a reply to a message to use that message. **!skills** lists them.
 - Manage things: "show everything", "remove 3", "restore 3", "what changed recently?"
-- I follow the chat even when you're not talking to me, and I can search the last two weeks. Ask me "what can you do?" for more.`;
+- I follow the chat even when you're not talking to me, and I remember it long-term (summaries plus a searchable log). Ask me "what can you do?" for more.`;
 const MAX_TOOL_ROUNDS = 5;
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
@@ -201,7 +201,7 @@ async function askCwaude(turns, people, message, opts = {}) {
     { type: "text", text: describeCustomizations(people, message.author.id, message.channelId) },
   ];
   const summary = message.guild ? channelSummaries(message.channelId) : "";
-  if (summary) system.push({ type: "text", text: `Summaries of this channel from the last few days (background; use when relevant):\n${summary}` });
+  if (summary) system.push({ type: "text", text: `Summaries of this channel: the latest month and weeks, then the last few days (background; use when relevant):\n${summary}` });
   if (opts.recent?.length) {
     system.push({
       type: "text",
@@ -313,7 +313,6 @@ async function chimeIn(message, rules) {
 
 /** Update the hourly per-channel summaries with the cheap model. */
 async function summarizeChat() {
-  prune();
   await updateSummaries(async (previous, lines, channelName, day) => {
     const response = await anthropic.messages.create({
       model: CHEAP_MODEL,
@@ -328,10 +327,27 @@ async function summarizeChat() {
         },
       ],
     });
-    const text = response.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
-    if (!text) throw new Error(`empty summary (stop_reason ${response.stop_reason})`);
-    return text;
+    return summaryText(response);
   });
+  // Roll finished weeks and months up into long-term summaries, then drop old dailies they cover.
+  await updateRollups(async (texts, label, channelName) => {
+    const response = await anthropic.messages.create({
+      model: CHEAP_MODEL,
+      max_tokens: 4000,
+      output_config: { effort: "low" },
+      system:
+        "You keep long-term notes on a Discord channel among friends so a chat bot can remember it months later. Condense the daily summaries you're given into one summary of the period: the main topics, plans and what happened with them, decisions, notable opinions and events, running jokes, and anything people might ask about later. Use names and mention dates for important things. Compact bullet points, under about 400 words. Output only the summary.",
+      messages: [{ role: "user", content: `Channel #${channelName}, ${label}. Daily summaries:\n\n${texts.join("\n\n")}` }],
+    });
+    return summaryText(response);
+  });
+  prune();
+}
+
+function summaryText(response) {
+  const text = response.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  if (!text) throw new Error(`empty summary (stop_reason ${response.stop_reason})`);
+  return text;
 }
 
 async function sendReply(message, text) {
