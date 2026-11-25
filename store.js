@@ -87,6 +87,7 @@ function blankItem(fields, by, now) {
     kind: fields.kind,
     text: fields.text.trim(),
     name: fields.kind === "skill" ? skillName(fields.name) : null,
+    description: fields.kind === "skill" ? fields.description?.trim() || null : undefined,
     people: fields.people ?? [],
     channel: fields.channel ?? null,
     when: fields.when?.trim() || null,
@@ -189,6 +190,7 @@ export function editItem(id, changes, by) {
     if (!changes.text.trim()) return { error: "The text is empty." };
     item.text = changes.text.trim();
   }
+  if (changes.description != null && item.kind === "skill") item.description = changes.description.trim() || null;
   if (changes.name != null && item.kind === "skill") {
     const name = skillName(changes.name);
     if (!name || RESERVED_NAMES.includes(name)) return { error: `Can't use "${changes.name}" as a skill name.` };
