@@ -109,9 +109,13 @@ export const CUSTOM_TOOLS = [
           description:
             "What to do when it's run, as instructions to yourself. Whatever the person types after the name is the input, and if they run it as a reply, the message they replied to is included too. When it runs you can search the chat log and the web. Keep everything they asked for.",
         },
+        description: {
+          type: "string",
+          description: 'A short one-line description for the !help list, e.g. "Fact-checks what someone said in the last 5 minutes".',
+        },
         nothing_else_to_answer: NOTHING_ELSE,
       },
-      required: ["name", "prompt", "nothing_else_to_answer"],
+      required: ["name", "prompt", "description", "nothing_else_to_answer"],
       additionalProperties: false,
     },
     strict: true,
@@ -132,6 +136,7 @@ export const CUSTOM_TOOLS = [
         chime_in_response: nullable({ type: "string", enum: ["reply", "react"], description: "Rules only: how to chime in." }),
         expires_in_minutes: nullable({ type: "integer", description: "New time limit in minutes from now; 0 to make it permanent." }),
         name: nullable({ type: "string", description: "Skills only: new name." }),
+        description: nullable({ type: "string", description: "Skills only: new one-line description for the !help list." }),
         nothing_else_to_answer: NOTHING_ELSE,
       },
       required: [
@@ -145,6 +150,7 @@ export const CUSTOM_TOOLS = [
         "chime_in_response",
         "expires_in_minutes",
         "name",
+        "description",
         "nothing_else_to_answer",
       ],
       additionalProperties: false,
@@ -313,6 +319,18 @@ export function describeCustomizations(conversation, askerId, channelId) {
 
 // ---------- the lists the bot posts itself ----------
 
+/** One skill as it appears in !help and !skills: `!name` (number) - description. */
+function skillLine(skill) {
+  // Skills saved before descriptions existed fall back to the start of their prompt.
+  const description = skill.description || shorten(skill.text.split(/(?<=[.!?])\s/)[0], 100);
+  return `\`!${skill.name}\` (${skill.id}) - ${description}`;
+}
+
+function skillSection(items) {
+  if (!items.length) return ["**Skills:** none"];
+  return ["**Skills:**", ...items.map(skillLine)];
+}
+
 function section(title, items) {
   if (!items.length) return [`**${title}:** none`];
   return [`**${title}:**`, ...items.map((item) => describe(item, { maxText: 200 }))];
@@ -334,7 +352,7 @@ export function renderList(what, id) {
     case "facts":
       return section("Facts", activeItems("fact")).join("\n");
     case "skills":
-      return section("Skills", activeItems("skill")).join("\n");
+      return skillSection(activeItems("skill")).join("\n");
     case "removed":
       return [...section("Removed (say \"restore <number>\" to bring one back)", removedItems())].join("\n");
     case "changes": {
@@ -352,7 +370,7 @@ export function renderList(what, id) {
       ].join("\n");
     }
     default:
-      return [...section("Rules", activeItems("rule")), "", ...section("Facts", activeItems("fact")), "", ...section("Skills", activeItems("skill"))].join("\n");
+      return [...section("Rules", activeItems("rule")), "", ...section("Facts", activeItems("fact")), "", ...skillSection(activeItems("skill"))].join("\n");
   }
 }
 
@@ -391,7 +409,7 @@ export function runCustomTool(block, ctx) {
       result = addItem({ kind: "fact", text: input.text, people: input.about }, ctx.by);
       break;
     case "add_skill":
-      result = addItem({ kind: "skill", name: input.name, text: input.prompt }, ctx.by);
+      result = addItem({ kind: "skill", name: input.name, text: input.prompt, description: input.description }, ctx.by);
       break;
     case "edit_item": {
       const changes = {
@@ -402,6 +420,7 @@ export function runCustomTool(block, ctx) {
         everyMessage: input.chime_in_on_every_message,
         respond: input.chime_in_response,
         name: input.name,
+        description: input.description,
       };
       if (input.this_channel_only != null) changes.channel = channel(input.this_channel_only);
       if (input.expires_in_minutes != null) changes.expiresAt = expiry(input.expires_in_minutes);
