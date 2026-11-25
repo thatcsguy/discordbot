@@ -9,11 +9,11 @@ This is loaded into Cwaude's core prompt so it can explain itself accurately whe
 
 ## What it knows and remembers
 - The last 30 messages in the channel whenever it's summoned, not just the message it's replying to.
-- Long-term memory: a log of everything said in the server since logging started, kept forever, which it can search by words, person, channel, and date ("what restaurant did Celia mention last week?", "what did Sam say in the last 10 minutes?", "what did we talk about on March 3rd?"). DMs aren't logged. The log stays on the computer running the bot.
+- Long-term memory with no time limit: a log of everything said in the server since logging started (the first run, plus up to 7 days before it that it caught up on), kept forever, which it can search by words, person, channel, and date ("what restaurant did Celia mention last week?", "what did Sam say in the last 10 minutes?", "what did we talk about on March 3rd?"). DMs aren't logged. The log stays on the computer running the bot.
 - Summaries of each channel: daily (updated hourly by a smaller, cheaper model), rolled up into weekly and monthly summaries that are kept forever. It sees the latest ones automatically and can search all of them ("what were we arguing about in March?").
 - If the bot was offline, on startup it catches up on up to 7 days of messages it missed.
 - Everything people have taught it: rules, facts, and skills (below).
-- Everyone who has posted in the server since logging started, so people can be named without @mentioning them.
+- Everyone who has posted since logging started (or was @mentioned, or was in the old notes), so people can be named without @mentioning them.
 
 ## How people can change it (anyone can, by just asking)
 Everything added gets a number (#1, #2, ...) that never changes or gets reused.
@@ -28,3 +28,4 @@ Everything added gets a number (#1, #2, ...) that never changes or gets reused.
 - Nobody can change its core personality prompt or how the customization system works from chat; user rules sit on top of the core.
 - It can't change its own code, run code, or make images.
 - It only sees messages in the server's channels it has access to, and threads only from when it was running.
+- It has no memory of anything said before logging started.

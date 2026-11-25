@@ -1,6 +1,7 @@
 // Channel awareness and long-term memory: a local log of every message the bot can see (kept
 // forever), hourly daily summaries written by a cheap model, weekly and monthly roll-ups of those
-// (kept forever), and search over all of it. Nothing leaves the machine except summary requests.
+// (kept forever), and search over all of it. The files stay on this machine; excerpts are sent to the
+// API only as part of summary requests and of prompts when the bot is summoned or chimes in.
 import fs from "node:fs";
 
 const DIR = new URL("./chatlog/", import.meta.url);
