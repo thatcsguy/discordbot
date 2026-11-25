@@ -7,7 +7,9 @@ import fs from "node:fs";
 const DIR = new URL("./chatlog/", import.meta.url);
 const SUMMARIES = new URL("./summaries.json", import.meta.url);
 const SUMMARIES_TMP = new URL("./summaries.json.tmp", import.meta.url);
-const RECENT_DAYS = 14; // how far back the summarizer and the restart check look for new messages
+// Not a retention limit (the log is kept forever): just how far back the hourly summarizer and the
+// startup catch-up scan the log for messages they haven't handled yet.
+const RECENT_DAYS = 14;
 const KEEP_DAILY_SUMMARIES_DAYS = 60; // daily summaries older than this are dropped once their month is rolled up
 
 fs.mkdirSync(DIR, { recursive: true });
