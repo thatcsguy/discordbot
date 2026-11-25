@@ -15,6 +15,11 @@ import {
 } from "./store.js";
 
 /**
+ * The API compiles every strict tool's schema into one grammar per request and rejects the request when it
+ * gets too big ("compiled grammar is too large"). So only the tools that change things are strict; the
+ * read-only lookup tools (search/sample the log, summaries, voice profiles) aren't, and their handlers
+ * cope with missing or odd arguments instead.
+ *
  * Strict tool schemas support anyOf, so "this or null" is spelled that way. The API allows at most 16 of
  * these across ALL tools in a request (it answers 400 above that), so use it only where null must differ
  * from an empty value, i.e. edit_item's "leave unchanged". Elsewhere use "" or 0 for "not set".
@@ -212,7 +217,6 @@ export const CUSTOM_TOOLS = [
       required: ["query", "user_id", "this_channel_only", "days_back", "from_date", "to_date", "minutes_back"],
       additionalProperties: false,
     },
-    strict: true,
   },
   {
     name: "sample_chat_log",
@@ -231,7 +235,6 @@ export const CUSTOM_TOOLS = [
       required: ["query", "user_id", "this_channel_only", "skip_recent_days", "from_date", "how_many"],
       additionalProperties: false,
     },
-    strict: true,
   },
   {
     name: "get_voice_profile",
@@ -244,7 +247,6 @@ export const CUSTOM_TOOLS = [
       required: ["user_ids"],
       additionalProperties: false,
     },
-    strict: true,
   },
   {
     name: "search_summaries",
@@ -259,7 +261,6 @@ export const CUSTOM_TOOLS = [
       required: ["query", "this_channel_only"],
       additionalProperties: false,
     },
-    strict: true,
   },
   {
     name: "show_list",
@@ -430,6 +431,9 @@ export function runCustomTool(block, ctx) {
   const fail = (text) => ({ error: true, text, changed: false });
   const channel = (only) => (only ? ctx.channel : null);
   const validDay = (day) => (/^\d{4}-\d{2}-\d{2}$/.test(day ?? "") ? day : null);
+  // The lookup tools aren't strict (see above), so their arguments may be missing or the wrong type.
+  const str = (value) => (typeof value === "string" ? value : value == null ? "" : String(value));
+  const int = (value, fallback = 0) => (Number.isFinite(Number(value)) && value !== "" && value != null ? Math.trunc(Number(value)) : fallback);
   const expiry = (minutes) => (minutes > 0 ? new Date(Date.now() + minutes * 60000).toISOString() : null);
   let result;
 
@@ -490,13 +494,13 @@ export function runCustomTool(block, ctx) {
     }
     case "search_chat_log": {
       const { total, lines } = searchLog({
-        query: input.query,
-        userId: input.user_id,
+        query: str(input.query),
+        userId: str(input.user_id),
         channelId: input.this_channel_only ? ctx.channel.id : null,
-        daysBack: input.days_back,
+        daysBack: int(input.days_back, 7),
         fromDay: validDay(input.from_date),
         toDay: validDay(input.to_date),
-        sinceTs: input.minutes_back > 0 ? Date.now() - input.minutes_back * 60000 : null,
+        sinceTs: int(input.minutes_back) > 0 ? Date.now() - int(input.minutes_back) * 60000 : null,
       });
       if (!total) return { error: false, text: "No matching messages.", changed: false };
       const note = total > lines.length ? `${total} matches; showing the ${lines.length} most recent:\n` : "";
@@ -504,23 +508,24 @@ export function runCustomTool(block, ctx) {
     }
     case "sample_chat_log": {
       const { total, months, lines } = sampleLog({
-        query: input.query,
-        userId: input.user_id,
+        query: str(input.query),
+        userId: str(input.user_id),
         channelId: input.this_channel_only ? ctx.channel.id : null,
-        skipRecentDays: input.skip_recent_days,
+        skipRecentDays: int(input.skip_recent_days),
         fromDay: validDay(input.from_date),
-        limit: Math.min(Math.max(input.how_many || 60, 10), 150),
+        limit: Math.min(Math.max(int(input.how_many, 60) || 60, 10), 150),
       });
       if (!total) return { error: false, text: `No matching messages. (The chat log starts ${firstLoggedDay() ?? "today"}.)`, changed: false };
       const note = `${total} matches (per month: ${months.join(", ")}); ${lines.length === total ? "all of them" : `${lines.length} spread across those months`}:\n`;
       return { error: false, text: note + lines.join("\n"), changed: false };
     }
     case "get_voice_profile": {
-      const texts = input.user_ids.map((id) => profileText(id) || `${personName(id)} (ID ${id}) has no voice profile (it needs ${MIN_MESSAGES}+ logged messages and someone running "!profiles build"); use sample_chat_log with their user_id instead.`);
+      const ids = (Array.isArray(input.user_ids) ? input.user_ids : [input.user_ids]).filter(Boolean).map(String);
+      const texts = ids.map((id) => profileText(id) || `${personName(id)} (ID ${id}) has no voice profile (it needs ${MIN_MESSAGES}+ logged messages and someone running "!profiles build"); use sample_chat_log with their user_id instead.`);
       return { error: false, text: texts.join("\n\n") || "No user IDs given.", changed: false };
     }
     case "search_summaries": {
-      const { total, texts } = searchSummaries({ query: input.query, channelId: input.this_channel_only ? ctx.channel.id : null });
+      const { total, texts } = searchSummaries({ query: str(input.query), channelId: input.this_channel_only ? ctx.channel.id : null });
       if (!total) return { error: false, text: `No matching summaries. (The chat log starts ${firstLoggedDay() ?? "today"}.)`, changed: false };
       const note = total > texts.length ? `${total} matches; showing the ${texts.length} most recent:\n\n` : "";
       return { error: false, text: note + texts.join("\n\n"), changed: false };
