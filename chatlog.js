@@ -1,11 +1,13 @@
-// Channel awareness: a local log of every message the bot can see, hourly summaries written by a
-// cheap model, and search over the log. Nothing here is sent anywhere except the summary requests.
+// Channel awareness and long-term memory: a local log of every message the bot can see (kept
+// forever), hourly daily summaries written by a cheap model, weekly and monthly roll-ups of those
+// (kept forever), and search over all of it. Nothing leaves the machine except summary requests.
 import fs from "node:fs";
 
 const DIR = new URL("./chatlog/", import.meta.url);
 const SUMMARIES = new URL("./summaries.json", import.meta.url);
 const SUMMARIES_TMP = new URL("./summaries.json.tmp", import.meta.url);
-const KEEP_DAYS = 14;
+const RECENT_DAYS = 14; // how far back the summarizer and the restart check look for new messages
+const KEEP_DAILY_SUMMARIES_DAYS = 60; // daily summaries older than this are dropped once their month is rolled up
 
 fs.mkdirSync(DIR, { recursive: true });
 
@@ -54,6 +56,24 @@ function readDay(day) {
   return entries.sort((a, b) => a.ts - b.ts);
 }
 
+/** Monday of the week containing `day` ("YYYY-MM-DD"), as "YYYY-MM-DD". */
+function weekOf(day) {
+  const d = new Date(`${day}T12:00:00`);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return dayOf(d);
+}
+
+const monthOf = (day) => day.slice(0, 7);
+
+/** Every day that has a log file, oldest first. */
+function loggedDays() {
+  return fs
+    .readdirSync(DIR)
+    .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+    .map((name) => name.slice(0, 10))
+    .sort();
+}
+
 function lastDays(n) {
   const days = [];
   for (let i = n - 1; i >= 0; i--) days.push(dayOf(Date.now() - i * 86400000));
@@ -63,34 +83,36 @@ function lastDays(n) {
 /** The newest logged message time per channel, so a restart knows what it missed. */
 export function lastLoggedByChannel() {
   const last = new Map();
-  for (const day of lastDays(KEEP_DAYS)) {
+  for (const day of lastDays(RECENT_DAYS)) {
     for (const entry of readDay(day)) last.set(entry.channelId, Math.max(last.get(entry.channelId) ?? 0, entry.ts));
   }
   return last;
 }
 
-/** Delete log files and summaries older than KEEP_DAYS. */
+/** Drop old daily summaries whose month already has a monthly summary. The raw log is never deleted. */
 export function prune() {
-  const keep = new Set(lastDays(KEEP_DAYS));
-  for (const name of fs.readdirSync(DIR)) {
-    const day = name.replace(/\.jsonl$/, "");
-    if (name.endsWith(".jsonl") && !keep.has(day)) fs.rmSync(new URL(name, DIR));
-  }
+  const cutoff = dayOf(Date.now() - KEEP_DAILY_SUMMARIES_DAYS * 86400000);
   for (const channel of Object.values(summaries.channels)) {
-    for (const day of Object.keys(channel.days)) if (!keep.has(day)) delete channel.days[day];
+    for (const day of Object.keys(channel.days)) {
+      if (day < cutoff && channel.months?.[monthOf(day)]) delete channel.days[day];
+    }
   }
   saveSummaries();
 }
 
 /**
  * Search the log. Every filter is optional; words must all appear (any order, any case).
+ * Range: sinceTs (exact time), or fromDay/toDay ("YYYY-MM-DD", inclusive), or the last daysBack days.
  * Returns formatted lines, oldest first, capped at `limit` (the most recent matches win).
  */
-export function searchLog({ query, userId, channelId, daysBack = 7, sinceTs = null, limit = 40 }) {
-  if (sinceTs) daysBack = Math.ceil((Date.now() - sinceTs) / 86400000) + 1;
+export function searchLog({ query, userId, channelId, daysBack = 7, sinceTs = null, fromDay = null, toDay = null, limit = 40 }) {
+  let from = fromDay ?? dayOf(Date.now() - (Math.max(daysBack, 1) - 1) * 86400000);
+  if (sinceTs) from = dayOf(sinceTs);
+  const to = toDay ?? dayOf(Date.now());
   const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
   const matches = [];
-  for (const day of lastDays(Math.min(Math.max(daysBack, 1), KEEP_DAYS))) {
+  for (const day of loggedDays()) {
+    if (day < from || day > to) continue;
     for (const entry of readDay(day)) {
       if (sinceTs && entry.ts < sinceTs) continue;
       if (userId && entry.userId !== userId) continue;
@@ -102,9 +124,17 @@ export function searchLog({ query, userId, channelId, daysBack = 7, sinceTs = nu
   return { total: matches.length, lines: matches.slice(-limit).map((e) => formatLine(e, { withDate: true, withChannel: true })) };
 }
 
+/** The first day in the log, so Claude knows how far back memory goes. */
+export function firstLoggedDay() {
+  return loggedDays()[0] ?? null;
+}
+
 // ---------- summaries ----------
 
-/** summaries = { channels: { [channelId]: { name, lastTs, days: { [day]: text } } } } */
+/**
+ * summaries = { channels: { [channelId]: { name, lastTs, days: { [day]: text },
+ *   weeks: { [mondayDay]: text }, months: { ["YYYY-MM"]: text } } } }
+ */
 let summaries = { channels: {} };
 try {
   summaries = { ...summaries, ...JSON.parse(fs.readFileSync(SUMMARIES, "utf8")) };
@@ -117,14 +147,76 @@ function saveSummaries() {
   fs.renameSync(SUMMARIES_TMP, SUMMARIES);
 }
 
-/** The last few days of summaries for one channel, oldest first, as text for the system prompt. */
-export function channelSummaries(channelId, days = 3) {
+/**
+ * Background for the system prompt: one channel's recent daily summaries plus the latest weekly and
+ * monthly roll-ups, oldest first.
+ */
+export function channelSummaries(channelId, { days = 3, weeks = 2, months = 1 } = {}) {
   const channel = summaries.channels[channelId];
   if (!channel) return "";
-  return lastDays(days)
-    .filter((day) => channel.days[day])
-    .map((day) => `${day}:\n${channel.days[day]}`)
-    .join("\n\n");
+  const parts = [];
+  for (const [month, text] of Object.entries(channel.months ?? {}).sort().slice(-months)) parts.push(`Month of ${month}:\n${text}`);
+  for (const [week, text] of Object.entries(channel.weeks ?? {}).sort().slice(-weeks)) parts.push(`Week of ${week}:\n${text}`);
+  for (const day of lastDays(days)) if (channel.days[day]) parts.push(`${day}:\n${channel.days[day]}`);
+  return parts.join("\n\n");
+}
+
+/**
+ * Search every summary (daily, weekly, monthly; any channel unless channelId is given) for
+ * summaries containing all the words. Returns the most recent matches, oldest first.
+ */
+export function searchSummaries({ query, channelId = null, limit = 8 }) {
+  const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const found = [];
+  for (const [id, channel] of Object.entries(summaries.channels)) {
+    if (channelId && id !== channelId) continue;
+    const add = (key, label, text) => {
+      if (words.every((w) => text.toLowerCase().includes(w))) found.push({ key, text: `#${channel.name}, ${label}:\n${text}` });
+    };
+    for (const [m, t] of Object.entries(channel.months ?? {})) add(`${m}-99`, `month of ${m}`, t);
+    for (const [w, t] of Object.entries(channel.weeks ?? {})) add(w, `week of ${w}`, t);
+    for (const [d, t] of Object.entries(channel.days)) add(d, d, t);
+  }
+  found.sort((a, b) => a.key.localeCompare(b.key));
+  return { total: found.length, texts: found.slice(-limit).map((f) => f.text) };
+}
+
+/**
+ * Roll finished weeks and months up into one summary each, from that period's daily summaries.
+ * `condense(texts, label, channelName)` returns the combined summary. Kept forever.
+ */
+export async function updateRollups(condense) {
+  const thisWeek = weekOf(dayOf(Date.now()));
+  const thisMonth = monthOf(dayOf(Date.now()));
+  for (const channel of Object.values(summaries.channels)) {
+    channel.weeks ??= {};
+    channel.months ??= {};
+    const days = Object.keys(channel.days).sort();
+    const periods = [
+      ...new Set(days.map(weekOf).filter((w) => w < thisWeek && !channel.weeks[w])),
+    ].map((w) => ({ store: channel.weeks, key: w, label: `the week of ${w}`, days: days.filter((d) => weekOf(d) === w) }));
+    periods.push(
+      ...[...new Set(days.map(monthOf).filter((m) => m < thisMonth && !channel.months[m]))].map((m) => ({
+        store: channel.months,
+        key: m,
+        label: `the month of ${m}`,
+        days: days.filter((d) => monthOf(d) === m),
+      })),
+    );
+    for (const period of periods) {
+      try {
+        period.store[period.key] = await condense(
+          period.days.map((d) => `${d}:\n${channel.days[d]}`),
+          period.label,
+          channel.name,
+        );
+        saveSummaries();
+        console.log(`[summaries] Rolled up #${channel.name}, ${period.label}.`);
+      } catch (err) {
+        console.error(`[summaries] Roll-up failed for #${channel.name}, ${period.label}:`, err.message);
+      }
+    }
+  }
 }
 
 /**
@@ -135,7 +227,7 @@ export function channelSummaries(channelId, days = 3) {
 export async function updateSummaries(summarize) {
   const startedAt = Date.now();
   const groups = new Map(); // "channelId|day" -> entries
-  for (const day of lastDays(KEEP_DAYS)) {
+  for (const day of lastDays(RECENT_DAYS)) {
     for (const entry of readDay(day)) {
       if (entry.ts <= (summaries.channels[entry.channelId]?.lastTs ?? 0) || entry.ts > startedAt) continue;
       const key = `${entry.channelId}|${day}`;

@@ -53,11 +53,12 @@ Managing them:
 ## Channel awareness
 
 Cwaude follows the chat even when nobody's talking to it:
-- Every server message (not DMs) is written to a local log in `chatlog/`, one file per day, kept for 14 days.
+- Every server message (not DMs) is written to a local log in `chatlog/`, one file per day, kept forever (it's just text: a few MB a month for a chatty server).
 - On startup it fetches from Discord whatever it missed while it was off (up to 7 days back per channel). That uses no tokens, and the next summary run catches up on it.
 - When summoned, it sees the last 30 messages in that channel, plus summaries of the channel's last 3 days.
 - Every hour, the cheap model folds new messages into each channel's daily summary (`summaries.json`). Only channels with new messages cost anything; a busy day is well under a cent on Haiku.
-- For anything older or more specific ("what restaurant did Celia mention last week?"), it can search the log.
+- When a week or month ends, the cheap model rolls that channel's daily summaries up into a weekly and a monthly summary, kept forever. Daily summaries are dropped after 60 days once their month is rolled up. The bot sees the latest month, the last two weeks and the last three days when summoned, and can search all summaries for older things.
+- For anything older or more specific ("what restaurant did Celia mention last week?", "what did we talk about in March?"), it can search the summaries and the full log.
 
 Let your friends know the bot keeps this log. It never leaves your computer except for the summary requests to the API.
 
