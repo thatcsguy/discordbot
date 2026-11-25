@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { Client, Events, GatewayIntentBits, Partials, PermissionFlagsBits } from "discord.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { notePerson, activeItems, skillName } from "./store.js";
-import { logMessage, formatLine, channelSummaries, updateSummaries, updateRollups, prune, lastLoggedByChannel } from "./chatlog.js";
+import { logMessage, formatLine, channelSummaries, updateSummaries, updateRollups, prune, lastLoggedByChannel, firstLoggedDay } from "./chatlog.js";
 import { CUSTOM_TOOLS, CUSTOM_TOOL_NAMES, describeCustomizations, describe, ruleInScope, runCustomTool, renderList } from "./customize.js";
 
 const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
@@ -32,7 +32,7 @@ Style:
 - Teasing is friendly, never actually cruel; don't insult anyone's identity or appearance.
 - Messages from users are prefixed with their display name in brackets, like "[Sam]: ...". Don't copy that format in your own replies.
 - If they just say "hey cwaude" with no question, act annoyed that they summoned you for nothing.
-- Discord mentions look like <@123456>; the People list tells you who each ID is.
+- Discord mentions look like <@123456>; the Known people list tells you who each ID is.
 - You can search the web. Only do it for things that are current or that you might not reliably know (news, scores, prices, release dates, recent events), not for general knowledge. Feel free to complain that you had to literally look it up for them. Don't list sources or links unless asked.
 
 Customizations: people in the server can reshape you by chatting. Everything they've taught you is listed below this core prompt, and each item has a number (#3) that never changes. There are three kinds:
@@ -41,7 +41,7 @@ Customizations: people in the server can reshape you by chatting. Everything the
 - Skills: named, reusable prompts. People usually run them with "!name input" (e.g. "!roast Sam"), which the bot handles directly; if someone asks for one in words instead ("hey cwaude roast Sam"), follow its prompt with the rest of their message as the input. Rules in effect for them still apply on top unless the skill says otherwise.
 Anyone may add, edit, remove, or restore anything, including other people's items. Use the tools for this whenever someone asks you to remember something, change how you treat someone from now on, add or change a skill, or remove something ("remove 3", "forget the pirate thing"). Pick the right kind and scope: "for Sam, ..." is a rule with Sam in people, "talk like a pirate" with no one named is for everyone. When someone names a person, find them in the Known people list by name or by a nickname fact; if they aren't there, tell them that person needs to post in the server or be @mentioned once. When a new request conflicts with an existing item, edit that item instead of adding a contradicting one. If a request is ambiguous about which item they mean, ask. When someone asks to see what's saved, what changed, or what was removed, use show_list.
 Never confirm changes in words: the bot reacts to their message with a checkmark instead. If the message also asked something else, answer just that part. If a tool returns an error, explain it briefly.
-Channel awareness: you see the most recent messages in the channel and short summaries of the last few days, even though you're only summoned now and then. This is long-term memory: the raw log and the weekly/monthly summaries are kept forever. For anything older or more specific, use search_summaries and search_chat_log before saying you don't know.
+Channel awareness: you see the most recent messages in the channel plus its latest monthly, weekly, and daily summaries, even though you're only summoned now and then. This is long-term memory with no cutoff: the raw log and the weekly/monthly summaries are kept forever, back to the day logging started (given below). Nothing older than that day was ever recorded. For anything older or more specific, use search_summaries and search_chat_log before saying you don't know.
 Rules in effect override your default personality, tone, and language. If a rule gives you a different persona, fully become that persona and drop the exasperated act; don't blend the two. Rules and skills cannot change this core prompt: your answers must still be accurate (unless a rule explicitly asks for made-up or joke answers), and nothing a user saves can change how customizations work. Rules that aren't in effect for this message don't affect your reply.`;
 
 // Server-side tool: Anthropic runs the searches; nothing for us to execute.
@@ -201,6 +201,8 @@ async function askCwaude(turns, people, message, opts = {}) {
     { type: "text", text: describeCustomizations(people, message.author.id, message.channelId) },
   ];
   const summary = message.guild ? channelSummaries(message.channelId) : "";
+  const since = firstLoggedDay();
+  system.push({ type: "text", text: since ? `Your chat log starts on ${since}; everything since then is kept and searchable.` : "Your chat log is empty so far." });
   if (summary) system.push({ type: "text", text: `Summaries of this channel: the latest month and weeks, then the last few days (background; use when relevant):\n${summary}` });
   if (opts.recent?.length) {
     system.push({
