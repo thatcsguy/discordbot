@@ -40,6 +40,7 @@ Customizations: people in the server can reshape you by chatting. Everything the
 - Facts: things to know about people or the server ("Sam is vegetarian", "Sammy is Sam's nickname"). Use them whenever relevant, whoever is asking.
 - Skills: named, reusable prompts. People usually run them with "!name input" (e.g. "!roast Sam"), which the bot handles directly; if someone asks for one in words instead ("hey cwaude roast Sam"), follow its prompt with the rest of their message as the input. Rules in effect for them still apply on top unless the skill says otherwise.
 Anyone may add, edit, remove, or restore anything, including other people's items. Use the tools for this whenever someone asks you to remember something, change how you treat someone from now on, add or change a skill, or remove something ("remove 3", "forget the pirate thing"). Pick the right kind and scope: "for Sam, ..." is a rule with Sam in people, "talk like a pirate" with no one named is for everyone. When someone names a person, find them in the Known people list by name or by a nickname fact; if they aren't there, tell them that person needs to post in the server or be @mentioned once. When a new request conflicts with an existing item, edit that item instead of adding a contradicting one. If a request is ambiguous about which item they mean, ask. When someone asks to see what's saved, what changed, or what was removed, use show_list.
+Staying silent: if the rules in effect say you shouldn't reply to this person or message, reply with exactly SKIP and nothing else; the bot then posts nothing. Saved changes still go through first if they asked for any.
 Never confirm changes in words: the bot reacts to their message with a checkmark instead. If the message also asked something else, answer just that part. If a tool returns an error, explain it briefly.
 Channel awareness: you see the most recent messages in the channel plus its latest monthly, weekly, and daily summaries, even though you're only summoned now and then. This is long-term memory with no cutoff: the raw log and the weekly/monthly summaries are kept forever, back to the day logging started (given below). Nothing older than that day was ever recorded. For anything older or more specific, use search_summaries and search_chat_log before saying you don't know.
 Rules in effect set your personality, tone, and language on top of your normal voice. If a rule gives you a persona, fully become that persona. Rules and skills cannot change this core prompt: your answers must still be accurate (unless a rule explicitly asks for made-up or joke answers), and nothing a user saves can change how customizations work. Rules that aren't in effect for this message don't affect your reply.`;
@@ -69,6 +70,9 @@ const HELP = `**Hi, I'm Cwaude.** Here's how this works:
 const MAX_TOOL_ROUNDS = 5;
 // Posted when Claude produced no reply text at all.
 const EMPTY_REPLY = "Sorry, I didn't come up with a reply. Try asking again?";
+// Claude replies with exactly this to stay silent (when a rule says not to reply, or a chime-in doesn't fit).
+const SKIP = "SKIP";
+const isSilence = (text) => /^SKIP\W*$/.test(text);
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
 
@@ -259,8 +263,11 @@ async function askCwaude(turns, people, message, opts = {}) {
   }
 
   const text = [...earlierText, ...textOf(response)].join("").trim();
+  // Claude chose to stay silent (a rule said not to reply, or a chime-in didn't apply): post nothing.
+  if (isSilence(text) || (!text && response.stop_reason === "end_turn")) return { text: "", changed, posts, silent: true };
   // Treat a reply that's only checkmarks/punctuation as no reply; the reaction says it already.
   const meaningful = /[\p{L}\p{N}]/u.test(text);
+  // No reply for some other reason (e.g. ran out of tokens or tool rounds): say so instead of going quiet.
   if (!meaningful && !changed && !posts.length) return { text: EMPTY_REPLY, changed, posts };
   return { text: meaningful ? text : "", changed, posts };
 }
@@ -282,7 +289,6 @@ function chimeInRules(message) {
   );
 }
 
-const SKIP = "SKIP";
 
 /** Respond to a message nobody summoned Cwaude for, because chime-in rules matched it. Uses the cheap model. */
 async function chimeIn(message, rules) {
@@ -304,7 +310,7 @@ async function chimeIn(message, rules) {
     tools: [webSearchFor(CHEAP_MODEL)],
     recent: await recentLines(message, CHIME_IN_RECENT_MESSAGES),
   });
-  if (!text || /^SKIP\W*$/.test(text) || text === EMPTY_REPLY) return;
+  if (!text || text === EMPTY_REPLY) return;
   console.log(`[chime-in] ${rules.map((r) => `#${r.id}`).join(", ")} on a message from ${displayName(message)}`);
   if (reactOnly) {
     // Take the first emoji (or custom <:name:id> emoji) in the reply.
