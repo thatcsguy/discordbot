@@ -9,7 +9,7 @@ const OLD_MEMORY = new URL("./memory.json", import.meta.url);
 
 export const KINDS = ["rule", "fact", "skill"];
 // Built-in "!" commands; skills can't take these names.
-export const RESERVED_NAMES = ["help", "skills"];
+export const RESERVED_NAMES = ["help", "skills", "profiles"];
 
 /** "Fact Check" -> "fact-check", so a skill name is one word you can type after "!". */
 export function skillName(name) {
@@ -88,6 +88,7 @@ function blankItem(fields, by, now) {
     text: fields.text.trim(),
     name: fields.kind === "skill" ? skillName(fields.name) : null,
     description: fields.kind === "skill" ? fields.description?.trim() || null : undefined,
+    recentMessages: fields.kind === "skill" ? recentCount(fields.recentMessages) : undefined,
     people: fields.people ?? [],
     channel: fields.channel ?? null,
     when: fields.when?.trim() || null,
@@ -100,6 +101,11 @@ function blankItem(fields, by, now) {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/** A skill's recent-message count: null = the default, otherwise 0 or more. */
+function recentCount(n) {
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 function cleanKeywords(keywords) {
@@ -191,6 +197,7 @@ export function editItem(id, changes, by) {
     item.text = changes.text.trim();
   }
   if (changes.description != null && item.kind === "skill") item.description = changes.description.trim() || null;
+  if (changes.recentMessages != null && item.kind === "skill") item.recentMessages = recentCount(changes.recentMessages);
   if (changes.name != null && item.kind === "skill") {
     const name = skillName(changes.name);
     if (!name || RESERVED_NAMES.includes(name)) return { error: `Can't use "${changes.name}" as a skill name.` };
