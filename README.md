@@ -68,12 +68,14 @@ Everything is stored locally in `customizations.json`, and every change is appen
 
 ## Voice profiles
 
-For skills that imitate people (like `!predict`), the bot can keep a **voice profile** of each regular: their style (length, caps, punctuation, emoji), vocabulary and catchphrases, recurring topics and running jokes, opinions, how they react to teasing or being wrong, who they talk to, and 20-30 real quotes. Profiles are written by the cheap model (`CHEAP_MODEL`) from excerpts spread evenly across every month of the log, each with a couple of lines of the conversation before it, so they reflect the whole year rather than last night's chat. Quotes are checked against the log and dropped if the model paraphrased them.
+For skills that imitate people (like `!predict`), the bot can keep a **voice profile** of each regular: a summary of their tone, message shape (length, caps, punctuation, emoji), humor and how they tease and take teasing, usual reactions, who they talk to, and only the themes and phrases they come back to far more than usual. Profiles are written by the cheap model (`CHEAP_MODEL`) from excerpts spread evenly across every month of the log, each with a couple of lines of the conversation before it, so they reflect the whole year rather than last night's chat.
+
+Profiles deliberately contain no verbatim quotes: with quotes, skills kept parroting whatever random lines got picked. Every profile handed to a skill comes with an instruction to capture style and tendencies, not reuse its wording, bring up a recurring theme only when the topic comes up, and vary which traits it leans on. Profiles built in the old format (with quotes) show as "old format" in `!profiles` and are rebuilt from scratch by the next `!profiles build` (or `!profiles rebuild Name`).
 
 - Only people with **100+ logged messages** qualify. Nobody else ever costs tokens.
 - Profiles are **never built automatically**. In Discord:
   - `!profiles` lists who qualifies (with message counts), who has a profile, and how many new messages each has since.
-  - `!profiles build` builds missing profiles and refreshes ones with 30+ new messages. A refresh reads only the messages posted since that person's last build.
+  - `!profiles build` builds missing and old-format profiles and refreshes ones with 30+ new messages. A refresh reads only the messages posted since that person's last build.
   - `!profiles build Name` / `!profiles rebuild Name` (start over from the whole log) / `!profiles show Name` work on one person.
 - A full build reads up to about 50k tokens per person on Haiku (a few cents); the bot reports the tokens used.
 - They're saved in `profiles.json` (git-ignored, stays on your computer).

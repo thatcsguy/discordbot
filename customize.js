@@ -238,7 +238,7 @@ export const CUSTOM_TOOLS = [
   },
   {
     name: "get_voice_profile",
-    description: `Get the voice profiles of one or more people: how they talk (style, vocabulary, catchphrases, running jokes, opinions, how they react to teasing) plus real quotes, built from their messages across the whole log. Use it whenever you imitate, predict, or write as someone. Only people with ${MIN_MESSAGES}+ messages have one.`,
+    description: `Get the voice profiles of one or more people: a summary of how they talk (tone, message shape, humor, how they tease and take teasing, usual reactions, recurring themes), built from their messages across the whole log. Use it whenever you imitate, predict, or write as someone: capture their style, don't reuse its wording, and only bring up a recurring theme when the topic comes up. Only people with ${MIN_MESSAGES}+ messages have one.`,
     input_schema: {
       type: "object",
       properties: {
