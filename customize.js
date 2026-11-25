@@ -13,7 +13,11 @@ import {
   personName,
 } from "./store.js";
 
-/** Strict tool schemas support anyOf, so "this or null" is spelled that way. */
+/**
+ * Strict tool schemas support anyOf, so "this or null" is spelled that way. The API allows at most 16 of
+ * these across ALL tools in a request (it answers 400 above that), so use it only where null must differ
+ * from an empty value, i.e. edit_item's "leave unchanged". Elsewhere use "" or 0 for "not set".
+ */
 const nullable = (schema) => ({ anyOf: [schema, { type: "null" }], ...(schema.description && { description: schema.description }) });
 
 const NOTHING_ELSE = {
@@ -39,10 +43,10 @@ export const CUSTOM_TOOLS = [
         text: { type: "string", description: 'Short, self-contained instruction, e.g. "Reply in pirate speak."' },
         people: { ...PEOPLE, description: "User IDs it applies to (when they're talking to you). Empty array = everyone." },
         this_channel_only: { type: "boolean", description: "true only if they said it should apply just in this channel." },
-        when: nullable({
+        when: {
           type: "string",
-          description: 'Plain-English situation it applies in, e.g. "when someone asks about food". null = always.',
-        }),
+          description: 'Plain-English situation it applies in, e.g. "when someone asks about food". "" = always.',
+        },
         chime_in_keywords: {
           type: "array",
           items: { type: "string" },
@@ -59,10 +63,10 @@ export const CUSTOM_TOOLS = [
           enum: ["reply", "react"],
           description: 'For chime-ins: "react" if they want just an emoji reaction (e.g. a check or an X), otherwise "reply".',
         },
-        expires_in_minutes: nullable({
+        expires_in_minutes: {
           type: "integer",
-          description: 'If they gave a time limit ("for 5 mins", "for the next hour"), that many minutes. null = permanent.',
-        }),
+          description: 'If they gave a time limit ("for 5 mins", "for the next hour"), that many minutes. 0 = permanent.',
+        },
         nothing_else_to_answer: NOTHING_ELSE,
       },
       required: [
@@ -186,16 +190,16 @@ export const CUSTOM_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        query: nullable({ type: "string", description: "Words that must all appear in the message (any case). null = any message." }),
-        user_id: nullable({ type: "string", description: "Only messages from this person (ID from Known people)." }),
+        query: { type: "string", description: 'Words that must all appear in the message (any case). "" = any message.' },
+        user_id: { type: "string", description: 'Only messages from this person (ID from Known people). "" = anyone.' },
         this_channel_only: { type: "boolean" },
         days_back: { type: "integer", description: "How many days back from today to search (any number). Ignored if from_date or minutes_back is set." },
-        from_date: nullable({ type: "string", description: 'Start date "YYYY-MM-DD" (inclusive) for searching a specific past period. null otherwise.' }),
-        to_date: nullable({ type: "string", description: 'End date "YYYY-MM-DD" (inclusive). null = today.' }),
-        minutes_back: nullable({
+        from_date: { type: "string", description: 'Start date "YYYY-MM-DD" (inclusive) for searching a specific past period. "" otherwise.' },
+        to_date: { type: "string", description: 'End date "YYYY-MM-DD" (inclusive). "" = today.' },
+        minutes_back: {
           type: "integer",
-          description: 'For recent things ("the last 5 minutes"): only messages from this many minutes ago until now. Overrides days_back. null otherwise.',
-        }),
+          description: 'For recent things ("the last 5 minutes"): only messages from this many minutes ago until now. Overrides days_back. 0 otherwise.',
+        },
       },
       required: ["query", "user_id", "this_channel_only", "days_back", "from_date", "to_date", "minutes_back"],
       additionalProperties: false,
@@ -209,7 +213,7 @@ export const CUSTOM_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        query: nullable({ type: "string", description: "Words that must all appear in the summary (any case). null = the most recent summaries." }),
+        query: { type: "string", description: 'Words that must all appear in the summary (any case). "" = the most recent summaries.' },
         this_channel_only: { type: "boolean" },
       },
       required: ["query", "this_channel_only"],
@@ -225,7 +229,7 @@ export const CUSTOM_TOOLS = [
       type: "object",
       properties: {
         what: { type: "string", enum: ["everything", "rules", "facts", "skills", "removed", "changes", "one_item"] },
-        id: nullable({ type: "integer", description: "For one_item: the item's number. Otherwise null." }),
+        id: { type: "integer", description: "For one_item: the item's number. Otherwise 0." },
         nothing_else_to_answer: NOTHING_ELSE,
       },
       required: ["what", "id", "nothing_else_to_answer"],
