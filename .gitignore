@@ -3,3 +3,6 @@ node_modules/
 memory.json
 memory.json.tmp
 bot.log
+customizations.json
+customizations.json.tmp
+changes.log

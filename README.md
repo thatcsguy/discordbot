@@ -34,6 +34,23 @@ npm start
 
 The bot runs for as long as that terminal is open.
 
+## Teaching it things (rules, facts, skills)
+
+Anyone in the server can reshape Cwaude just by asking it. Everything they add gets a number, so it's easy to undo.
+
+- **Rules** change how it behaves: "hey cwaude, for Sam always reply in pirate speak", "hey cwaude, in this channel keep answers to one sentence", "hey cwaude, when someone asks about food, recommend tacos". You don't need to @mention the person, as long as they've posted in the server since the bot started tracking (otherwise @mention them once).
+- **Chime-in rules** make it reply without being summoned: "hey cwaude, whenever anyone says pineapple pizza, reply 'gross'". The bot checks messages against the trigger words itself and only calls Claude when one matches.
+- **Facts** are things it should know: "hey cwaude, remember Sam is vegetarian", "hey cwaude, Sammy is Sam's nickname".
+- **Skills** are reusable prompts you run by name: "hey cwaude, make a skill called roast: write a 3-line roast of whoever I name", then "hey cwaude roast Sam".
+
+Managing them:
+- "hey cwaude show everything" / "show rules" / "show skills" / "show removed" posts a numbered list.
+- "hey cwaude remove 3" removes #3; "restore 3" brings it back. Numbers are never reused.
+- "hey cwaude change 3 to only apply to Celia" edits it in place.
+- "hey cwaude what changed recently?" shows who changed what and when.
+
+Everything is stored locally in `customizations.json`, and every change is appended to `changes.log` (who, when, before/after). Both are git-ignored. The core personality in `SYSTEM_PROMPT` can't be changed from chat; user rules layer on top of it. The first time the new version runs, old per-person notes from `memory.json` are imported as rules (the old file is left alone).
+
 ## Tweaking
 
 - **Personality**: edit `SYSTEM_PROMPT` in `index.js`.
