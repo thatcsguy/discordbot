@@ -57,7 +57,7 @@ Cwaude follows the chat even when nobody's talking to it:
 - On startup it fetches from Discord whatever it missed while it was off (up to 7 days back per channel). That uses no tokens, and the next summary run catches up on it.
 - When summoned, it sees the last 30 messages in that channel, plus the channel's summaries (details below).
 - Every hour, the cheap model folds new messages into each channel's daily summary (`summaries.json`). Only channels with new messages cost anything; a busy day is well under a cent on Haiku.
-- When a week or month ends, the cheap model rolls that channel's daily summaries up into a weekly and a monthly summary, kept forever. Daily summaries are dropped after 60 days once their month is rolled up. The bot sees the latest month, the last two weeks and the last three days when summoned, and can search all summaries for older things.
+- When a week or month ends, the cheap model rolls that channel's daily summaries up into a weekly and a monthly summary, kept forever. Daily summaries are dropped after 60 days once their month is rolled up. When summoned, the bot sees the latest monthly summary, the two latest weekly summaries and the last three daily ones, and can search all summaries for older things.
 - For anything older or more specific ("what restaurant did Celia mention last week?", "what did we talk about in March?"), it can search the summaries and the full log.
 
 There's no time limit on this memory, but it only goes back to when logging started: the first run of this version, plus the up-to-7 days it caught up on then.
